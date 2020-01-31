@@ -1,3 +1,6 @@
 [submodule "demos"]
 	path = demos
 	url = https://github.com/gem/oq-qgis-demos.git
+[submodule "plugins/qgis-server-api-plugin"]
+	path = plugins/qgis-server-api-plugin
+	url = https://github.com/opengisch/qgis-server-api-plugin.git
