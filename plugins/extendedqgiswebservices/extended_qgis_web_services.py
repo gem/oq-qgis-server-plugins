@@ -19,6 +19,7 @@
 
 import json
 from qgis.server import QgsService, QgsServerProjectUtils
+from qgis.core import QgsRasterLayer
 
 
 class EWMS(QgsService):
@@ -36,16 +37,42 @@ class EWMS(QgsService):
         return True
 
     def executeRequest(self, request, response, project):
-        if request.parameters()['REQUEST'] != 'GetLayerCustomProperties':
-            response.setStatusCode(400)
-            response.write("Missing or invalid 'REQUEST' parameter")
-        else:
+        if request.parameters()['REQUEST'] == 'GetLayerNames':
+            try:
+                self._get_layer_names(
+                    request, response, project)
+            except Exception as exc:
+                response.setStatusCode(500)
+                response.write("An error occurred: %s" % exc)
+        elif request.parameters()['REQUEST'] == 'GetLayerCustomProperties':
             try:
                 self._get_custom_properties_by_layer(
                     request, response, project)
             except Exception as exc:
                 response.setStatusCode(500)
                 response.write("An error occurred: %s" % exc)
+        elif request.parameters()['REQUEST'] == 'GetLayerFields':
+            try:
+                self._get_fields_by_layer(request, response, project)
+            except Exception as exc:
+                response.setStatusCode(500)
+                response.write("An error occurred: %s" % exc)
+        elif request.parameters()['REQUEST'] == 'GetLayerStyles':
+            try:
+                self._get_styles_by_layer(request, response, project)
+            except Exception as exc:
+                response.setStatusCode(500)
+                response.write("An error occurred: %s" % exc)
+        else:
+            response.setStatusCode(400)
+            response.write("Missing or invalid 'REQUEST' parameter")
+
+    def _get_layer_names(self, request, response, project):
+        layer_names = [
+            layer.name() for id, layer in project.mapLayers().items()]
+        response.setStatusCode(200)
+        response.write(
+            json.dumps(layer_names, indent=4, sort_keys=True))
 
     def _get_custom_properties_by_layer(self, request, response, project):
         if QgsServerProjectUtils.wmsUseLayerIds(project):
@@ -104,6 +131,85 @@ class EWMS(QgsService):
         response.setStatusCode(200)
         response.write(
             json.dumps(custom_props_filtered, indent=4, sort_keys=True))
+
+    def _get_fields_by_layer(self, request, response, project):
+        if QgsServerProjectUtils.wmsUseLayerIds(project):
+            dict_key = 'id'
+        else:
+            dict_key = 'name'
+        try:
+            layer_keys_str = request.parameters()['LAYERS']
+        except KeyError:
+            layer_keys_str = None
+        if layer_keys_str:
+            layer_keys = layer_keys_str.split(',')
+        else:
+            layer_keys = None
+        fields_by_layer = {}
+        for layer_id, layer in project.mapLayers().items():
+            if isinstance(layer, QgsRasterLayer):
+                continue
+            # If a shortname is set, we must use it instead of
+            # the plain layer name
+            layer_name = layer.shortName() or layer.name()
+            if dict_key == 'name':
+                layer_key = layer_name
+            else:
+                layer_key = layer_id
+            if layer_keys:
+                if dict_key == 'name' and layer_name not in layer_keys:
+                    continue
+                if dict_key == 'id' and layer_id not in layer_keys:
+                    continue
+            fields_by_layer[layer_key] = {}
+            if dict_key == 'name':
+                fields_by_layer[layer_name]['layer_id'] = layer_id
+            else:
+                fields_by_layer[layer_id]['layer_name'] = layer_name
+            fields_by_layer[layer_key] = [
+                field.name() for field in layer.fields()]
+        response.setStatusCode(200)
+        response.write(
+            json.dumps(fields_by_layer, indent=4, sort_keys=True))
+
+    def _get_styles_by_layer(self, request, response, project):
+        if QgsServerProjectUtils.wmsUseLayerIds(project):
+            dict_key = 'id'
+        else:
+            dict_key = 'name'
+        try:
+            layer_keys_str = request.parameters()['LAYERS']
+        except KeyError:
+            layer_keys_str = None
+        if layer_keys_str:
+            layer_keys = layer_keys_str.split(',')
+        else:
+            layer_keys = None
+        styles_by_layer = {}
+        for layer_id, layer in project.mapLayers().items():
+            if isinstance(layer, QgsRasterLayer):
+                continue
+            # If a shortname is set, we must use it instead of
+            # the plain layer name
+            layer_name = layer.shortName() or layer.name()
+            if dict_key == 'name':
+                layer_key = layer_name
+            else:
+                layer_key = layer_id
+            if layer_keys:
+                if dict_key == 'name' and layer_name not in layer_keys:
+                    continue
+                if dict_key == 'id' and layer_id not in layer_keys:
+                    continue
+            styles_by_layer[layer_key] = {}
+            if dict_key == 'name':
+                styles_by_layer[layer_name]['layer_id'] = layer_id
+            else:
+                styles_by_layer[layer_id]['layer_name'] = layer_name
+            styles_by_layer[layer_key] = layer.styleManager().styles()
+        response.setStatusCode(200)
+        response.write(
+            json.dumps(styles_by_layer, indent=4, sort_keys=True))
 
 
 class EWM():
