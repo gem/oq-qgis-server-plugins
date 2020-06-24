@@ -206,7 +206,10 @@ class EWMS(QgsService):
                 styles_by_layer[layer_name]['layer_id'] = layer_id
             else:
                 styles_by_layer[layer_id]['layer_name'] = layer_name
-            styles_by_layer[layer_key] = layer.styleManager().styles()
+            styles_by_layer[layer_key] = {
+                'names': layer.styleManager().styles(),
+                'current': layer.styleManager().currentStyle(),
+            }
         response.setStatusCode(200)
         response.write(
             json.dumps(styles_by_layer, indent=4, sort_keys=True))
