@@ -63,6 +63,12 @@ class EWMS(QgsService):
             except Exception as exc:
                 response.setStatusCode(500)
                 response.write("An error occurred: %s" % exc)
+        elif request.parameters()['REQUEST'] == 'GetLayerFieldValues':
+            try:
+                self._get_field_values_by_layer(request, response, project)
+            except Exception as exc:
+                response.setStatusCode(500)
+                response.write("An error occurred: %s" % exc)
         else:
             response.setStatusCode(400)
             response.write("Missing or invalid 'REQUEST' parameter")
@@ -213,6 +219,42 @@ class EWMS(QgsService):
         response.setStatusCode(200)
         response.write(
             json.dumps(styles_by_layer, indent=4, sort_keys=True))
+
+    def _get_field_values_by_layer(self, request, response, project):
+        if QgsServerProjectUtils.wmsUseLayerIds(project):
+            dict_key = 'id'
+        else:
+            dict_key = 'name'
+        layer_key_in = request.parameters()['LAYER']
+        field_name = request.parameters()['FIELD_NAME']
+
+        field_values = []
+        for layer_id, layer in project.mapLayers().items():
+            if isinstance(layer, QgsRasterLayer):
+                continue
+            # If a shortname is set, we must use it instead of
+            # the plain layer name
+            layer_name = layer.shortName() or layer.name()
+            if dict_key == 'name':
+                layer_key = layer_name
+            else:
+                layer_key = layer_id
+            if layer_key != layer_key_in:
+                continue
+            field_values = [[feat['fid'], feat[field_name]]
+                            for feat in layer.getFeatures()]
+            break
+        response.setStatusCode(200)
+        if not field_values:
+            response.write(
+                json.dumps(
+                    {'success': False,
+                     'reason': 'Field not found'}, indent=4, sort_keys=True))
+        else:
+            response.write(
+                json.dumps(
+                    {'success': True,
+                     'content': field_values}, indent=4, sort_keys=True))
 
 
 class EWM():
