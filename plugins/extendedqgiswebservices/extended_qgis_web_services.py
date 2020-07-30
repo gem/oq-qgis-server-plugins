@@ -225,8 +225,20 @@ class EWMS(QgsService):
             dict_key = 'id'
         else:
             dict_key = 'name'
-        layer_key_in = request.parameters()['LAYER']
-        field_name = request.parameters()['FIELD_NAME']
+        params = request.parameters()
+        layer_key_in = params['LAYER']
+        field_name = params['FIELD_NAME']
+        # filters_in is like 'NAME_1:Cundinamarca,NAME_2:Vianí'
+        philters_in = params['FILTERS'] if 'FILTERS' in params else None
+        philters = []
+        if philters_in:
+            philters = [philter_in.split(':')
+                        for philter_in in philters_in.split(',')]
+        unique_in = params['UNIQUE'] if 'UNIQUE' in params else 'False'
+        unique = True if unique_in.upper() == 'TRUE' else False
+
+        if unique:
+            field_set = set()
 
         field_values = []
         for layer_id, layer in project.mapLayers().items():
@@ -241,8 +253,21 @@ class EWMS(QgsService):
                 layer_key = layer_id
             if layer_key != layer_key_in:
                 continue
-            field_values = [[feat['fid'], feat[field_name]]
-                            for feat in layer.getFeatures()]
+            for feat in layer.getFeatures():
+                to_skip = False
+                for philter in philters:
+                    if feat[philter[0]] != philter[1]:
+                        to_skip = True
+                        break
+                if to_skip:
+                    continue
+                if unique:
+                    field_set.add(feat[field_name])
+                else:
+                    field_values.append([feat['fid'], feat[field_name]])
+            if unique:
+                field_values = [[x, x] for x in field_set]
+            field_values = sorted(field_values, key=lambda x: x[1])
             break
         response.setStatusCode(200)
         if not field_values:
