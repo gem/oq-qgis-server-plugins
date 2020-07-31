@@ -18,6 +18,7 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import json
+from urllib import parse
 from qgis.server import QgsService, QgsServerProjectUtils
 from qgis.core import QgsRasterLayer
 
@@ -227,20 +228,24 @@ class EWMS(QgsService):
             dict_key = 'name'
         params = request.parameters()
         layer_key_in = params['LAYER']
-        field_name = params['FIELD_NAME']
+        field_names = params['FIELD_NAMES'].split(',')
         # filters_in is like 'NAME_1:Cundinamarca,NAME_2:Vianí'
         philters_in = params['FILTERS'] if 'FILTERS' in params else None
         philters = []
         if philters_in:
             philters = [philter_in.split(':')
                         for philter_in in philters_in.split(',')]
+            philters = [[ph[0], parse.unquote(ph[1])] for ph in philters]
         unique_in = params['UNIQUE'] if 'UNIQUE' in params else 'False'
         unique = True if unique_in.upper() == 'TRUE' else False
 
         if unique:
+            if len(field_names) > 1:
+                raise NotImplementedError()
             field_set = set()
 
         field_values = []
+        # field_values = [[philter[0], philter[1]] for philter in philters]
         for layer_id, layer in project.mapLayers().items():
             if isinstance(layer, QgsRasterLayer):
                 continue
@@ -256,18 +261,33 @@ class EWMS(QgsService):
             for feat in layer.getFeatures():
                 to_skip = False
                 for philter in philters:
-                    if feat[philter[0]] != philter[1]:
+                    if philter[0] == 'NAME_0':
+                        continue
+                    if str(feat[philter[0]]) != philter[1]:
                         to_skip = True
                         break
                 if to_skip:
                     continue
                 if unique:
-                    field_set.add(feat[field_name])
+                    if field_names[0] == 'NAME_0':
+                        field_set.add('Colombia FIXME')
+                    else:
+                        field_set.add(feat[field_names[0]])
                 else:
-                    field_values.append([feat['fid'], feat[field_name]])
+                    item = [feat['fid']]
+                    for field_name in field_names:
+                        try:
+                            if field_name == 'NAME_0':
+                                item.append('Colombia FIXME')
+                            else:
+                                item.append(feat[field_name])
+                        except KeyError:
+                            item.append(field_name + ' not found')
+                    field_values.append(item)
             if unique:
-                field_values = [[x, x] for x in field_set]
-            field_values = sorted(field_values, key=lambda x: x[1])
+                field_values.extend([[x, x] for x in field_set])
+            if len(field_names) == 1:
+                field_values = sorted(field_values, key=lambda x: x[1])
             break
         response.setStatusCode(200)
         if not field_values:
@@ -279,7 +299,7 @@ class EWMS(QgsService):
             response.write(
                 json.dumps(
                     {'success': True,
-                     'content': field_values}, indent=4, sort_keys=True))
+                     'content': field_values}, sort_keys=True))
 
 
 class EWM():
