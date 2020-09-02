@@ -240,8 +240,8 @@ class EWMS(QgsService):
         unique = True if unique_in.upper() == 'TRUE' else False
 
         if unique:
-            if len(field_names) > 1:
-                raise NotImplementedError()
+            # if len(field_names) > 1:
+            #     raise NotImplementedError()
             field_set = set()
 
         field_values = []
@@ -269,12 +269,13 @@ class EWMS(QgsService):
                 if to_skip:
                     continue
                 if unique:
-                    if field_names[0] == 'NAME_0':
-                        field_set.add('Colombia FIXME')
-                    else:
-                        field_set.add(feat[field_names[0]])
+                    # if field_names[0] == 'NAME_0':
+                    #     field_set.add('Colombia FIXME')
+                    # else:
+                    field_set.add(
+                        tuple(feat[field_name] for field_name in field_names))
                 else:
-                    item = [feat['fid']]
+                    item = []
                     for field_name in field_names:
                         try:
                             if field_name == 'NAME_0':
@@ -285,8 +286,8 @@ class EWMS(QgsService):
                             item.append(field_name + ' not found')
                     field_values.append(item)
             if unique:
-                field_values.extend([[x, x] for x in field_set])
-            if len(field_names) == 1:
+                field_values.extend([list(x) for x in field_set])
+            if len(field_names) > 1 or unique:
                 field_values = sorted(field_values, key=lambda x: x[1])
             break
         response.setStatusCode(200)
