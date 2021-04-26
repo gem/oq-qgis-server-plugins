@@ -1,0 +1,13 @@
+[general]
+name=OpacityDelegate Plugin for QGIS Server
+qgisMinimumVersion=3.4
+description=Web Services for QGIS Server, to delegate opacity to the client
+version=version 1.0
+author=Matteo Nastasi and Paolo Tormene (GEM Foundation)
+email=matteo.nastasi@globalquakemodel.org, paolo.tormene@globalquakemodel.org
+; if True it's a server plugin
+server=True
+
+changelog=
+
+about=Extends WMTS, to delegate opacity to the client
