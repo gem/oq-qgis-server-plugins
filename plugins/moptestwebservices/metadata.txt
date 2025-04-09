@@ -1,0 +1,14 @@
+[general]
+name=MOPTEST Plugin for QGIS Server
+qgisMinimumVersion=3.4
+description=Web Services for QGIS Server, experimental plugin to verify QGIS functionalities
+version=version 1.0
+author=Matteo Nastasi (GEM Foundation)
+email=matteo.nastasi@globalquakemodel.org
+; if True it's a server plugin
+server=True
+
+changelog=
+
+about=GEM test with QGIS server
+
