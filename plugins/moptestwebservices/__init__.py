@@ -19,5 +19,5 @@
 
 
 def serverClassFactory(serverIface):
-    from . moptest_webservices import MOPTEST_REG
+    from . mop_test_web_services import MOPTEST_REG
     return MOPTEST_REG(serverIface)
