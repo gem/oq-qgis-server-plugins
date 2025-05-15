@@ -17,19 +17,20 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+import io
+import numpy
 import json
-import time
 from qgis.server import QgsService
 from qgis.core import (
     QgsProject, QgsVectorFileWriter, QgsVectorLayer,
-    QgsPointXY, QgsField, QgsFeatureRequest, QgsFeature, QgsGeometry,
-    )  # QgsPoint)
-from qgis.PyQt.QtCore import QVariant  # QMetaType, QSettings
+    QgsPointXY, QgsField, QgsFeature, QgsGeometry,
+    edit)  # QgsPoint, QgsFeatureRequest
+from qgis.PyQt.QtCore import QVariant, pyqtRemoveInputHook
+from requests import Session
 
-# from qgis.PyQt.QtCore import pyqtRemoveInputHook
-# def _mute():
-#     pyqtRemoveInputHook()
 
+def _mute():
+    pyqtRemoveInputHook()
 # import pdb ; _mute() ; pdb.set_trace()
 
 
@@ -53,8 +54,30 @@ class MOPTEST(QgsService):
         # empty in case no projects have been loaded)
         # print(project.fileName())
 
+        calc_id = request.parameter('CALC_ID')
+        imts = request.parameter('IMTS').split(',')
 
-        # Pulisci il progetto corrente (opzionale, ma consigliato per evitare conflitti)
+        hostname = 'http://127.0.0.1:8800'
+        session = Session()
+
+        # engine_login(hostname, None, None, session)
+
+        # retrieve list of calculations
+        resp = session.get(
+            'http://127.0.0.1:8800/v1/calc/list', timeout=10, verify=False,
+            allow_redirects=False)
+
+        resp = session.get(
+            'http://127.0.0.1:8800/v1/calc/%d/extract/oqparam' % (int(calc_id),),
+            timeout=100, verify=False, allow_redirects=False)
+
+        js = bytes(numpy.load(io.BytesIO(resp.content))['json'])
+        oqparam = json.loads(js)
+
+        if (set(imts) - set([x for x in oqparam['hazard_imtls']])) != set():
+            print('FIXME: failure here')
+
+        # Clean current project
         project.clear()
 
         # Load another project
@@ -62,52 +85,83 @@ class MOPTEST(QgsService):
             '/home/nastasi/git/oq-geoviewer'
             '/project_samples/papers/PapersTmpl.qgs')
         print(project.fileName())
+        for imt in imts:
+            resp = session.get(
+                'http://127.0.0.1:8800/v1/calc/%d/extract/avg_gmf?imt=%s' % (
+                    int(calc_id), imt),
+                timeout=100, verify=False, allow_redirects=False)
 
-        # New vector layer initialization
-        layer = QgsVectorLayer("Point", "NuovoLayer", "memory")
+            try:
+                if numpy.__version__ >= '1.24.0':
+                    extracted_npz = numpy.load(
+                        io.BytesIO(resp.content), allow_pickle=False,
+                        max_header_size=100000)
+                else:
+                    extracted_npz = numpy.load(
+                        io.BytesIO(resp.content), allow_pickle=False)
+            except Exception as exc:
+                print('FIXME: failure here')
 
-        # Add fields to the layer
-        layer.dataProvider().addAttributes([
-            QgsField("id", QVariant.Int),
-            QgsField("nome", QVariant.String)
-        ])
-        layer.updateFields()
+            # New vector layer initialization
+            layer = QgsVectorLayer("Point", imt, "memory")
 
-        # Create some sample features
-        feature1 = QgsFeature()
-        feature1.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(10, 10)))
-        feature1.setAttributes([1, "Punto 1"])
+            # Add fields to the layer
+            layer.dataProvider().addAttributes([
+                # QgsField("id", QVariant.Int),
+                QgsField(imt, QVariant.Double)
+            ])
+            layer.updateFields()
 
-        feature2 = QgsFeature()
-        feature2.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(20, 20)))
-        feature2.setAttributes([2, "Punto 2"])
+            extracted_tuples = numpy.column_stack((
+                extracted_npz['lons'], extracted_npz['lats'],
+                extracted_npz[imt]))
 
-        # Add features to the layer
-        layer.dataProvider().addFeatures([feature1, feature2])
+            #  import pdb ; _mute() ; pdb.set_trace()
 
-        # Update the layer extension
-        layer.updateExtents()
+            all_features = []
+            with edit(layer):
+                # for idx in range(0, len(extracted_npz['lons'])):
+                # for idx in range(0, 100):
+                for idx, (lon, lat, imt_val) in enumerate(
+                        extracted_tuples):
+                    # import pdb ; _mute() ; pdb.set_trace()
+                    if (idx % 1000) == 0:
+                        print("Idx: %d" % idx)
 
-        # Save layer as GeoPackage
-        save_options = QgsVectorFileWriter.SaveVectorOptions()
-        save_options.driverName = "GPKG"
-        layer_name = "NuovoLayer"
-        save_options.layerName = layer_name
-        gpkg_filepath = ('/home/nastasi/git/oq-geoviewer'
-                         '/project_samples/papers/out/Papers02_layer.gpkg')
-        error = QgsVectorFileWriter.writeAsVectorFormat(
-            layer, gpkg_filepath,
-            "UTF-8", layer.crs(), "GPKG", layerOptions=['OVERWRITE=YES'])
+                    # Create some sample features
+                    feature = QgsFeature()
+                    feature.setGeometry(QgsGeometry.fromPointXY(
+                        QgsPointXY(lon, lat)))
+                    feature.setAttributes([imt_val])
+                    all_features.append(feature)
 
-        if error[0] == QgsVectorFileWriter.NoError:
-            print("Layer save: success")
-        else:
-            print("Layer save: error:", error)
+                print('Post loop')
+                layer.dataProvider().addFeatures(all_features)
 
-        gpkg_layer = QgsVectorLayer(gpkg_filepath, layer_name, 'ogr')
+                # Update the layer extension
+                layer.updateExtents()
 
-        # add gpkg layer to current QGIS project
-        QgsProject.instance().addMapLayer(gpkg_layer)
+            # Save layer as GeoPackage
+            save_options = QgsVectorFileWriter.SaveVectorOptions()
+            save_options.driverName = "GPKG"
+            layer_name = imt
+            save_options.layerName = layer_name
+            gpkg_filepath = (
+                '/home/nastasi/git/oq-geoviewer'
+                '/project_samples/papers/out/Papers03_%s.gpkg' % imt)
+            error = QgsVectorFileWriter.writeAsVectorFormat(
+                layer, gpkg_filepath,
+                "UTF-8", layer.crs(), "GPKG", layerOptions=['OVERWRITE=YES'])
+
+            if error[0] == QgsVectorFileWriter.NoError:
+                print("Layer save: success")
+            else:
+                print("Layer save: error:", error)
+
+            imt_layer = QgsVectorLayer(gpkg_filepath, layer_name, 'ogr')
+
+            # add gpkg layer to current QGIS project
+            QgsProject.instance().addMapLayer(imt_layer)
 
         project.write(
             '/home/nastasi/git/oq-geoviewer'

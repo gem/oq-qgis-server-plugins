@@ -1,5 +1,10 @@
 # QGIS Extended WMS plugin
 
+# utils from oq-irmt-qgis plugin are:
+#
+# cp ~/git/oq-irmt-qgis/svir/utilities/{utils,shared}.py ./svir_utils/
+#
+
 ```
 SERVICE=MOPTEST
 REQUEST=GetLayerCustomProperties
