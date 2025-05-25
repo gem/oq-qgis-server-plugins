@@ -21,10 +21,11 @@ import io
 import numpy
 import json
 from requests import Session
-
+from qgis.core import Qgis, QgsMessageLog
 from qgis.server import QgsService, QgsServerProjectUtils
 
-LOG_FI = '/io/data/spy.log'
+def gem_log(msg, log_level):
+    QgsMessageLog.logMessage(msg, 'EWMS', log_level)
 
 from qgis.core import (
     QgsRasterLayer, QgsProject, QgsVectorLayer, QgsVectorFileWriter,
@@ -154,13 +155,8 @@ def get_style(layer, message_bar, restore_defaults=False):
         'force_restyling': force_restyling
     }
 
-from qgis.core import Qgis, QgsMessageLog
-
 from .prova import pippo
 
-
-def gem_log(msg, log_level):
-    QgsMessageLog.logMessage(msg + pippo, 'EWMS', log_level)
 
 
 class EWMS(QgsService):
@@ -176,6 +172,7 @@ class EWMS(QgsService):
 
     def allowMethod(method):
         return True
+
 
     def executeRequest(self, request, response, project):
         gem_log('MOP WAS HERE', Qgis.Critical)
@@ -446,7 +443,7 @@ class EWMS(QgsService):
         # empty in case no projects have been loaded)
         # print(project.fileName())
 
-        print('here we are', file=open(LOG_FI, 'a'))
+        gem_log('calc2map', Qgis.Critical)
         calc_id = request.parameter('CALC_ID')
         imts = request.parameter('IMTS').split(',')
 
