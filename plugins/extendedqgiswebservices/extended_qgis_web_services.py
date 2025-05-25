@@ -447,20 +447,25 @@ class EWMS(QgsService):
         calc_id = request.parameter('CALC_ID')
         imts = request.parameter('IMTS').split(',')
 
-        hostname = 'http://127.0.0.1:8800'
+        # hostname = 'http://127.0.0.1:8800'
+        hostname = 'http://host.docker.internal:8800'
+        
         session = Session()
 
         # engine_login(hostname, None, None, session)
 
+        gem_log('calc2map: pre get', Qgis.Critical)
         # retrieve list of calculations
         resp = session.get(
             '%s/v1/calc/list' % hostname, timeout=10, verify=False,
             allow_redirects=False)
 
+        gem_log('calc2map: pre oq-param', Qgis.Critical)
         resp = session.get(
             '%s/v1/calc/%d/extract/oqparam' % (hostname, int(calc_id),),
             timeout=100, verify=False, allow_redirects=False)
 
+        gem_log('calc2map: post oq-param', Qgis.Critical)
         js = bytes(numpy.load(io.BytesIO(resp.content))['json'])
         oqparam = json.loads(js)
 
