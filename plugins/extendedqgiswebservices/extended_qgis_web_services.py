@@ -18,40 +18,31 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import io
+import os
 import numpy
 import json
 from requests import Session
-from qgis.core import Qgis, QgsMessageLog
+
+from qgis.core import Qgis
 from qgis.server import QgsService, QgsServerProjectUtils
-
-def gem_log(msg, log_level):
-    QgsMessageLog.logMessage(msg, 'EWMS', log_level)
-
 from qgis.core import (
     QgsRasterLayer, QgsProject, QgsVectorLayer, QgsVectorFileWriter,
     QgsField, edit, QgsFeature, QgsPointXY, QgsGeometry,
     QgsReferencedRectangle, QgsSymbol, QgsGradientColorRamp,
-    QgsApplication, QgsStyle, NULL, Qgis)
+    QgsGraduatedSymbolRenderer,
+    QgsApplication, QgsStyle, NULL)
 from qgis.PyQt.QtGui import QColor
-from qgis.PyQt.QtCore import (QVariant, QSettings)
+from qgis.PyQt.QtCore import QVariant
 
-RAMP_EXTREME_COLORS = {
-    'Reds':
-        {'top': '#67000d',
-         'bottom': '#fff5f0'},
-    'Blues':
-        {'top': '#08306b',
-         'bottom': '#f7fbff'},
-    'Greens':
-        {'top': '#00441b',
-         'bottom': '#f7fcf5'},
-    'Spectral':
-        {'top': '#d7191c',
-         'bottom': '#2b83ba'}
-}
+from .svir_utils.shared import RAMP_EXTREME_COLORS
+from .svir_utils.utils import get_style
+
+from .gem_common import gem_log, rmdir_recursive, alphanum_rndstr
+from .lock import acquire_lock, release_lock
+from .zipdir import zipdir
+
 
 if Qgis.QGIS_VERSION_INT < 31000:
-    from qgis.core import QgsGraduatedSymbolRenderer
     # the following is an enum
     DEFAULT_STYLE_MODE = QgsGraduatedSymbolRenderer.Quantile
 else:
@@ -71,92 +62,86 @@ DEFAULT_SETTINGS = dict(
 )
 
 
-def get_style(layer, message_bar, restore_defaults=False):
-    settings = QSettings()
-    if restore_defaults:
-        color_from_rgba = DEFAULT_SETTINGS['color_from_rgba']
-    else:
-        try:
-            color_from_rgba = int(settings.value(
-                'irmt/style_color_from',
-                DEFAULT_SETTINGS['color_from_rgba']))
-        except TypeError:
-            msg = ('The type of the stored setting "style_color_from" was not'
-                   ' valid, so the default has been restored.')
-            if message_bar:
-                log_msg(msg, level='C', message_bar=message_bar)
-            else:
-                print(msg)
-            color_from_rgba = DEFAULT_SETTINGS['color_from_rgba']
-    color_from = QColor().fromRgba(color_from_rgba)
-    if restore_defaults:
-        color_to_rgba = DEFAULT_SETTINGS['color_to_rgba']
-    else:
-        try:
-            color_to_rgba = int(settings.value(
-                'irmt/style_color_to',
-                DEFAULT_SETTINGS['color_to_rgba']))
-        except TypeError:
-            msg = ('The type of the stored setting "style_color_to" was not'
-                   ' valid, so the default has been restored.')
-            if message_bar:
-                log_msg(msg, level='C', message_bar=message_bar)
-            else:
-                print(msg)
-            color_to_rgba = DEFAULT_SETTINGS['color_to_rgba']
-    color_to = QColor().fromRgba(color_to_rgba)
-    if Qgis.QGIS_VERSION_INT < 31000:
-        style_mode = (DEFAULT_SETTINGS['style_mode']
-                      if restore_defaults
-                      else int(settings.value(
-                          'irmt/style_mode', DEFAULT_SETTINGS['style_mode'])))
-    else:
-        style_mode = (DEFAULT_SETTINGS['style_mode']
-                      if restore_defaults
-                      else settings.value(
-                          'irmt/style_mode', DEFAULT_SETTINGS['style_mode']))
-    classes = (DEFAULT_SETTINGS['style_classes']
-               if restore_defaults
-               else int(settings.value(
-                   'irmt/style_classes',
-                   DEFAULT_SETTINGS['style_classes'])))
-    # look for the setting associated to the layer if available
-    force_restyling = None
-    if layer is not None:
-        # NOTE: We can't use %s/%s instead of %s_%s, because / is a special
-        #       character
-        value, found = QgsProject.instance().readBoolEntry(
-            'irmt', '%s_%s' % (layer.id(), 'force_restyling'))
-        if found:
-            force_restyling = value
-    if restore_defaults:
-        force_restyling = DEFAULT_SETTINGS['force_restyling']
-    # FIXME QGIS3: at project level, qgis pretends to find a value as false,
-    #              even when it should be not found, so it prevents layers
-    #              to be styled
-    #
-    # otherwise look for the setting at project level
-    # if force_restyling is None:
-    #     value, found = QgsProject.instance().readBoolEntry(
-    #         'irmt', 'force_restyling')
-    #     if found:
-    #         force_restyling = value
-    # if again the setting is not found, look for it at the general level
-    if force_restyling is None:
-        force_restyling = settings.value(
-            'irmt/force_restyling',
-            DEFAULT_SETTINGS['force_restyling'],
-            type=bool)
-    return {
-        'color_from': color_from,
-        'color_to': color_to,
-        'style_mode': style_mode,
-        'classes': classes,
-        'force_restyling': force_restyling
-    }
+def _style_curves(layer, style_by):
+    use_sgc_style = False
+    opacity = 0.7
 
-from .prova import pippo
+    symbol = QgsSymbol.defaultSymbol(layer.geometryType())
+    symbol.setOpacity(opacity)
 
+    style = get_style(layer, None)
+
+    ramp = QgsGradientColorRamp(
+        style['color_from'], style['color_to'])
+
+    style_mode = style['style_mode']
+
+    default_qgs_style = QgsStyle().defaultStyle()
+    default_color_ramp_names = default_qgs_style.colorRampNames()
+
+    style_mode = 'EqualInterval'
+
+    ramp_type_idx = default_color_ramp_names.index('Spectral')
+    inverted = True
+    symbol.setColor(QColor(RAMP_EXTREME_COLORS['Reds']['top']))
+
+    ramp = default_qgs_style.colorRamp(
+        default_color_ramp_names[ramp_type_idx])
+    if inverted:
+        ramp.invert()
+
+    ramp = default_qgs_style.colorRamp(
+        default_color_ramp_names[ramp_type_idx])
+
+    symbol.setColor(QColor(RAMP_EXTREME_COLORS['Reds']['top']))
+
+    if inverted:
+        ramp.invert()
+
+    # get unique values
+    fni = layer.fields().indexOf(style_by)
+    unique_values = layer.dataProvider().uniqueValues(fni)
+    num_unique_values = len(unique_values - {NULL})
+    gem_log('num_uniq: %d, QGIS vers: %d' % (
+        num_unique_values, Qgis.QGIS_VERSION_INT), Qgis.Critical)
+
+    if num_unique_values > 2:
+        if Qgis.QGIS_VERSION_INT < 31000:
+            renderer = QgsGraduatedSymbolRenderer.createRenderer(
+                layer,
+                style_by,
+                min(num_unique_values, style['classes']),
+                style_mode,
+                symbol.clone(),
+                ramp)
+        else:
+            renderer = QgsGraduatedSymbolRenderer(
+                style_by, [])
+            # NOTE: the following returns an instance of one of the
+            #       subclasses of QgsClassificationMethod
+            classification_method = \
+                QgsApplication.classificationMethodRegistry().method(
+                    style_mode)
+            renderer.setClassificationMethod(classification_method)
+            renderer.updateColorRamp(ramp)
+            renderer.updateSymbols(symbol.clone())
+            renderer.updateClasses(
+                layer, min(num_unique_values, style['classes']))
+            print('post updateClasses')
+        if not use_sgc_style:
+            if Qgis.QGIS_VERSION_INT < 31000:
+                label_format = renderer.labelFormat()
+                # NOTE: the following line might be useful
+                # label_format.setTrimTrailingZeroes(True)
+                label_format.setPrecision(2)
+                renderer.setLabelFormat(label_format, updateRanges=True)
+            else:
+                print('not use_sgc_style')
+                renderer.classificationMethod().setLabelPrecision(2)
+                renderer.calculateLabelPrecision()
+
+    layer.setRenderer(renderer)
+    layer.setOpacity(opacity)
 
 
 class EWMS(QgsService):
@@ -205,10 +190,11 @@ class EWMS(QgsService):
                 response.write("An error occurred: %s" % exc)
         elif request.parameters()['REQUEST'] == 'OQEngine2Map':
             try:
-                self._oqengine_calc2map(request, response, project)
+                self._oq_engine_calc2map(request, response, project)
             except Exception as exc:
                 response.setStatusCode(500)
                 response.write("An error occurred: %s" % exc)
+                response.close()
         else:
             response.setStatusCode(400)
             response.write("Missing or invalid 'REQUEST' parameter")
@@ -357,113 +343,46 @@ class EWMS(QgsService):
         response.write(
             json.dumps(styles_by_layer, indent=4, sort_keys=True))
 
-    def _style_curves(self, layer, style_by):
-        use_sgc_style = False
-        opacity = 0.7
-
-        symbol = QgsSymbol.defaultSymbol(layer.geometryType())
-        symbol.setOpacity(opacity)
-
-        style = get_style(layer, None)
-
-        ramp = QgsGradientColorRamp(
-            style['color_from'], style['color_to'])
-
-        style_mode = style['style_mode']
-
-        default_qgs_style = QgsStyle().defaultStyle()
-        default_color_ramp_names = default_qgs_style.colorRampNames()
-
-        style_mode = 'EqualInterval'
-
-        ramp_type_idx = default_color_ramp_names.index('Spectral')
-        inverted = True
-        symbol.setColor(QColor(RAMP_EXTREME_COLORS['Reds']['top']))
-
-        ramp = default_qgs_style.colorRamp(
-            default_color_ramp_names[ramp_type_idx])
-        if inverted:
-            ramp.invert()
-
-        ramp = default_qgs_style.colorRamp(
-            default_color_ramp_names[ramp_type_idx])
-
-        symbol.setColor(QColor(RAMP_EXTREME_COLORS['Reds']['top']))
-
-        if inverted:
-            ramp.invert()
-
-        # get unique values
-        fni = layer.fields().indexOf(style_by)
-        unique_values = layer.dataProvider().uniqueValues(fni)
-        num_unique_values = len(unique_values - {NULL})
-        print('num_uniq: %d' % num_unique_values)
-        if num_unique_values > 2:
-            if Qgis.QGIS_VERSION_INT < 31000:
-                renderer = QgsGraduatedSymbolRenderer.createRenderer(
-                    layer,
-                    style_by,
-                    min(num_unique_values, style['classes']),
-                    style_mode,
-                    symbol.clone(),
-                    ramp)
-            else:
-                renderer = QgsGraduatedSymbolRenderer(
-                    style_by, [])
-                # NOTE: the following returns an instance of one of the
-                #       subclasses of QgsClassificationMethod
-                classification_method = \
-                    QgsApplication.classificationMethodRegistry().method(
-                        style_mode)
-                renderer.setClassificationMethod(classification_method)
-                renderer.updateColorRamp(ramp)
-                renderer.updateSymbols(symbol.clone())
-                renderer.updateClasses(
-                    layer, min(num_unique_values, style['classes']))
-                print('post updateClasses')
-            if not use_sgc_style:
-                if Qgis.QGIS_VERSION_INT < 31000:
-                    label_format = renderer.labelFormat()
-                    # NOTE: the following line might be useful
-                    # label_format.setTrimTrailingZeroes(True)
-                    label_format.setPrecision(2)
-                    renderer.setLabelFormat(label_format, updateRanges=True)
-                else:
-                    print('not use_sgc_style')
-                    renderer.classificationMethod().setLabelPrecision(2)
-                    renderer.calculateLabelPrecision()
-
-        layer.setRenderer(renderer)
-        layer.setOpacity(opacity)
-
-    def _oqengine_calc2map(self, request, response, project):
+    def _oq_engine_calc2map(self, request, response, project):
+        os.umask(0o0002)
         # Get the project instance
         project = QgsProject.instance()
         # Print the current project file name (might be
         # empty in case no projects have been loaded)
         # print(project.fileName())
 
+        # create random prefix to avoid clash names
+
         gem_log('calc2map', Qgis.Critical)
         calc_id = request.parameter('CALC_ID')
+        description = request.parameter('DESCRIPTION')
         imts = request.parameter('IMTS').split(',')
 
         # hostname = 'http://127.0.0.1:8800'
-        hostname = 'http://host.docker.internal:8800'
-        
+        eng_proto = 'http'
+        eng_name = 'host.docker.internal'
+        eng_port = '8800'
+        engine_url = '%s://%s:%s' % (eng_proto, eng_name, eng_port)
+
         session = Session()
 
         # engine_login(hostname, None, None, session)
 
         gem_log('calc2map: pre get', Qgis.Critical)
+        gem_log('calc2map: [%s]' % ('%s/v1/calc/list' % engine_url),
+                Qgis.Critical)
         # retrieve list of calculations
         resp = session.get(
-            '%s/v1/calc/list' % hostname, timeout=10, verify=False,
+            '%s/v1/calc/list' % engine_url, timeout=10, verify=False,
             allow_redirects=False)
 
-        gem_log('calc2map: pre oq-param', Qgis.Critical)
+        gem_log('calc2map: post get', Qgis.Critical)
+
+        oqparam_req = '%s/v1/calc/%d/extract/oqparam' % (
+            engine_url, int(calc_id),)
+        gem_log('calc2map: pre oq-param: [%s]' % oqparam_req, Qgis.Critical)
         resp = session.get(
-            '%s/v1/calc/%d/extract/oqparam' % (hostname, int(calc_id),),
-            timeout=100, verify=False, allow_redirects=False)
+            oqparam_req, timeout=100, verify=False, allow_redirects=False)
 
         gem_log('calc2map: post oq-param', Qgis.Critical)
         js = bytes(numpy.load(io.BytesIO(resp.content))['json'])
@@ -475,107 +394,157 @@ class EWMS(QgsService):
         # Clean current project
         project.clear()
 
-        # Load another project
-        project.read(
-            '/home/nastasi/git/oq-geoviewer'
-            '/project_samples/papers/PapersTmpl.qgs')
-        print(project.fileName())
-        for imt in imts:
-            resp = session.get(
-                'http://127.0.0.1:8800/v1/calc/%d/extract/avg_gmf?imt=%s' % (
-                    int(calc_id), imt),
-                timeout=100, verify=False, allow_redirects=False)
+        for i in range(0, 5):
+            rnd_sfx = alphanum_rndstr(8)
+            project_name = '%s_%s' % (description, rnd_sfx)
+            lock_filename = '/io/uploads/projects/%s.lock' % project_name
+            if acquire_lock(lock_filename):
+                break
+        else:
+            gem_log('calc2map: lock of %s failed' % lock_filename,
+                    Qgis.Critical)
+            response.setStatusCode(500)
+            response.write('calc2map: lock of %s failed' % lock_filename)
+            return
 
-            try:
-                if numpy.__version__ >= '1.24.0':
-                    extracted_npz = numpy.load(
-                        io.BytesIO(resp.content), allow_pickle=False,
-                        max_header_size=100000)
+            gem_log('calc2map: lock acquired %s' % lock_filename,
+                    Qgis.Critical)
+
+        # this 'try:' is to be able to unlock the locked file at the end of
+        # project creation procedure
+        try:
+            # Load another project
+            project.read('/io/uploads/templates/PapersTmpl.qgs')
+            gem_log('calc2map: project name: %s' % project.fileName(),
+                    Qgis.Critical)
+
+            # mkdir of base for all files of the project
+            project_folder = '/io/uploads/projects/%s' % project_name
+            layer_folder = '%s/layers' % project_folder
+            os.mkdir(project_folder)
+            os.mkdir(layer_folder)
+            for imt in imts:
+                resp = session.get(
+                    '%s/v1/calc/%d/extract/avg_gmf?imt=%s' % (
+                        engine_url, int(calc_id), imt),
+                    timeout=100, verify=False, allow_redirects=False)
+
+                try:
+                    if numpy.__version__ >= '1.24.0':
+                        extracted_npz = numpy.load(
+                            io.BytesIO(resp.content), allow_pickle=False,
+                            max_header_size=100000)
+                    else:
+                        extracted_npz = numpy.load(
+                            io.BytesIO(resp.content), allow_pickle=False)
+                except Exception as exc:
+                    print('FIXME: failure here %s' % exc)
+
+                # New vector layer initialization
+                layer = QgsVectorLayer("Point", imt, "memory")
+
+                # Add fields to the layer
+                layer.dataProvider().addAttributes([
+                    # QgsField("id", QVariant.Int),
+                    QgsField(imt, QVariant.Double)
+                ])
+                layer.updateFields()
+
+                extracted_tuples = numpy.column_stack((
+                    extracted_npz['lons'], extracted_npz['lats'],
+                    extracted_npz[imt]))
+
+                #  import pdb ; _mute() ; pdb.set_trace()
+
+                all_features = []
+                with edit(layer):
+                    # for idx in range(0, len(extracted_npz['lons'])):
+                    # for idx in range(0, 100):
+                    for idx, (lon, lat, imt_val) in enumerate(
+                            extracted_tuples):
+                        ## if (idx % 1000) == 0:
+                        ##     print("Idx: %d, lon %f lat %f val %f" % (
+                        ##           idx, lon, lat, imt_val))
+
+                        # if idx == 1000:
+                        #     break
+
+                        # Create some sample features
+                        feature = QgsFeature()
+                        feature.setGeometry(QgsGeometry.fromPointXY(
+                            QgsPointXY(float(lon), float(lat))))
+                        feature.setAttributes([float(imt_val)])
+                        all_features.append(feature)
+
+                    ret = layer.dataProvider().addFeatures(all_features)
+                    # print('Post loop len ret %d all_features: %d' % (
+                    #     ret, len(all_features)))
+
+                    # Update the layer extension
+                    layer.updateExtents()
+
+                # Save layer as GeoPackage
+                save_options = QgsVectorFileWriter.SaveVectorOptions()
+                save_options.driverName = "GPKG"
+                layer_name = imt
+                save_options.layerName = layer_name
+
+                gpkg_filepath = '%s/%s_%s_%s.gpkg' % (
+                    layer_folder, description, imt, rnd_sfx)
+                gem_log('calc2map: pre layer save [%s]' % gpkg_filepath,
+                        Qgis.Critical)
+                error = QgsVectorFileWriter.writeAsVectorFormat(
+                    layer, gpkg_filepath,
+                    "UTF-8", layer.crs(), "GPKG",
+                    layerOptions=['OVERWRITE=YES'])
+
+                gem_log('calc2map: post layer save', Qgis.Critical)
+
+                if error[0] == QgsVectorFileWriter.NoError:
+                    print("Layer save: success")
                 else:
-                    extracted_npz = numpy.load(
-                        io.BytesIO(resp.content), allow_pickle=False)
-            except Exception as exc:
-                print('FIXME: failure here %s' % exc)
+                    print("Layer save: error:", error)
 
-            # New vector layer initialization
-            layer = QgsVectorLayer("Point", imt, "memory")
+                imt_layer = QgsVectorLayer(gpkg_filepath, layer_name, 'ogr')
 
-            # Add fields to the layer
-            layer.dataProvider().addAttributes([
-                # QgsField("id", QVariant.Int),
-                QgsField(imt, QVariant.Double)
-            ])
-            layer.updateFields()
+                gem_log('IMT: %s' % imt, Qgis.Critical)
 
-            extracted_tuples = numpy.column_stack((
-                extracted_npz['lons'], extracted_npz['lats'],
-                extracted_npz[imt]))
+                _style_curves(imt_layer, imt)
 
-            #  import pdb ; _mute() ; pdb.set_trace()
+                # add gpkg layer to current QGIS project
+                QgsProject.instance().addMapLayer(imt_layer)
 
-            all_features = []
-            with edit(layer):
-                # for idx in range(0, len(extracted_npz['lons'])):
-                # for idx in range(0, 100):
-                for idx, (lon, lat, imt_val) in enumerate(
-                        extracted_tuples):
-                    # import pdb ; _mute() ; pdb.set_trace()
-                    if (idx % 1000) == 0:
-                        print("Idx: %d" % idx)
+                extent = layer.extent()
+                ref_rect = QgsReferencedRectangle(extent, layer.crs())
+                vs_project = project.viewSettings()
+                vs_project.setDefaultViewExtent(ref_rect)
 
-                    # if idx == 1000:
-                    #     break
+            gem_log('calc2map: pre project save', Qgis.Critical)
 
-                    # Create some sample features
-                    feature = QgsFeature()
-                    feature.setGeometry(QgsGeometry.fromPointXY(
-                        QgsPointXY(lon, lat)))
-                    feature.setAttributes([imt_val])
-                    all_features.append(feature)
+            project_filepath = '%s/%s.qgs' % (project_folder, project_name)
+            project.write(project_filepath)
+            project.clear()
+            gem_log('calc2map: post project save', Qgis.Critical)
 
-                print('Post loop')
-                layer.dataProvider().addFeatures(all_features)
+            old_dir = os.getcwd()
+            os.chdir(project_folder)
 
-                # Update the layer extension
-                layer.updateExtents()
+            gem_log('calc2map: chdir("%s")' % project_folder, Qgis.Critical)
 
-            # Save layer as GeoPackage
-            save_options = QgsVectorFileWriter.SaveVectorOptions()
-            save_options.driverName = "GPKG"
-            layer_name = imt
-            save_options.layerName = layer_name
-            gpkg_filepath = (
-                '/home/nastasi/git/oq-geoviewer'
-                '/project_samples/papers/out/Papers03_%s.gpkg' % imt)
-            error = QgsVectorFileWriter.writeAsVectorFormat(
-                layer, gpkg_filepath,
-                "UTF-8", layer.crs(), "GPKG", layerOptions=['OVERWRITE=YES'])
+            zipdir('%s.zip' % project_folder, '.')
+            os.chdir(old_dir)
 
-            if error[0] == QgsVectorFileWriter.NoError:
-                print("Layer save: success")
-            else:
-                print("Layer save: error:", error)
+            rmdir_recursive(project_folder)
 
-            imt_layer = QgsVectorLayer(gpkg_filepath, layer_name, 'ogr')
+            gem_log('calc2map: post project zip', Qgis.Critical)
 
-            _style_curves(imt_layer, imt)
+            response.setStatusCode(200)
+            response.write(
+                json.dumps({'owner': 'mop', 'test': project.fileName()},
+                           indent=4, sort_keys=True))
+        finally:
+            release_lock(lock_filename)
 
-            # add gpkg layer to current QGIS project
-            QgsProject.instance().addMapLayer(imt_layer)
-
-            extent = layer.extent()
-            ref_rect = QgsReferencedRectangle(extent, layer.crs())
-            vs_project = project.viewSettings()
-            vs_project.setDefaultViewExtent(ref_rect)
-
-        project.write(
-            '/home/nastasi/git/oq-geoviewer'
-            '/project_samples/papers/out/Papers03.qgz')
-
-        response.setStatusCode(200)
-        response.write(
-            json.dumps({'owner': 'mop', 'test': project.fileName()},
-                       indent=4, sort_keys=True))
 
 class EWM():
 
