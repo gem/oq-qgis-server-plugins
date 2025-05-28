@@ -158,10 +158,7 @@ class EWMS(QgsService):
     def allowMethod(method):
         return True
 
-
     def executeRequest(self, request, response, project):
-        gem_log('MOP WAS HERE', Qgis.Critical)
-
         if request.parameters()['REQUEST'] == 'GetLayerNames':
             try:
                 self._get_layer_names(
@@ -386,10 +383,16 @@ class EWMS(QgsService):
 
         gem_log('calc2map: post oq-param', Qgis.Critical)
         js = bytes(numpy.load(io.BytesIO(resp.content))['json'])
-        oqparam = json.loads(js)
+        calc = json.loads(js)
 
-        if (set(imts) - set([x for x in oqparam['hazard_imtls']])) != set():
-            print('FIXME: failure here')
+        calc_imtls = (calc['risk_imtls'] if 'risk_imtls' in calc
+                      else calc['hazard_imtls'])
+        if (set(imts) - set([x for x in calc_imtls])) != set():
+            gem_log("calc2map: list of imt doesn't match calc imts",
+                    Qgis.Critical)
+            response.setStatusCode(500)
+            response.write("calc2map: list of imt doesn't match calc imts")
+            return
 
         # Clean current project
         project.clear()
@@ -462,9 +465,9 @@ class EWMS(QgsService):
                     # for idx in range(0, 100):
                     for idx, (lon, lat, imt_val) in enumerate(
                             extracted_tuples):
-                        ## if (idx % 1000) == 0:
-                        ##     print("Idx: %d, lon %f lat %f val %f" % (
-                        ##           idx, lon, lat, imt_val))
+                        # if (idx % 1000) == 0:
+                        #     print("Idx: %d, lon %f lat %f val %f" % (
+                        #           idx, lon, lat, imt_val))
 
                         # if idx == 1000:
                         #     break
@@ -476,9 +479,7 @@ class EWMS(QgsService):
                         feature.setAttributes([float(imt_val)])
                         all_features.append(feature)
 
-                    ret = layer.dataProvider().addFeatures(all_features)
-                    # print('Post loop len ret %d all_features: %d' % (
-                    #     ret, len(all_features)))
+                    layer.dataProvider().addFeatures(all_features)
 
                     # Update the layer extension
                     layer.updateExtents()
