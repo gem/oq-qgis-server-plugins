@@ -34,6 +34,30 @@ from qgis.core import (
 from qgis.PyQt.QtGui import QColor
 from qgis.PyQt.QtCore import QVariant
 
+
+
+
+
+from qgis.core import QgsCoordinateReferenceSystem
+from qgis.gui import QgsMapCanvas
+from qgis.PyQt.QtCore import QSize
+from qgis.core import QgsRectangle
+
+
+
+
+
+
+# from qgis.PyQt.QtCore import QSize
+# from qgis.core import (
+#     QgsApplication,
+#     QgsMapSettings,
+#     QgsRectangle,
+#     QgsCoordinateReferenceSystem
+# )
+# from qgis.gui import QgsMapCanvas
+
+
 from .svir_utils.shared import RAMP_EXTREME_COLORS
 from .svir_utils.utils import get_style
 
@@ -513,7 +537,7 @@ class EWMS(QgsService):
                 _style_curves(imt_layer, imt)
 
                 # add gpkg layer to current QGIS project
-                QgsProject.instance().addMapLayer(imt_layer)
+                project.addMapLayer(imt_layer)
 
                 extent = layer.extent()
                 ref_rect = QgsReferencedRectangle(extent, layer.crs())
@@ -522,26 +546,50 @@ class EWMS(QgsService):
 
             gem_log('calc2map: pre project save', Qgis.Critical)
 
+            # Create canvas
+            canvas = QgsMapCanvas()
+            canvas.setObjectName("theMapCanvas")
+            # Set canvas size
+            canvas.resize(QSize(800, 600))
+
+            # FIXME: set proper values
+
+            # Set coordinate reference system
+            # crs = QgsCoordinateReferenceSystem("EPSG:4326")
+            canvas.setDestinationCrs(layer.crs())
+
+            # Set extent
+            # extent = ref_rect  # QgsRectangle(-180, -90, 180, 90)
+            canvas.setExtent(extent)
+
+            #
+            #  save qgis project
+            #
             project_filepath = '%s/%s.qgs' % (project_folder, project_name)
             project.write(project_filepath)
+            project_filename = project.fileName()
             project.clear()
-            gem_log('calc2map: post project save', Qgis.Critical)
+            gem_log('calc2map: post project save, filename [%s]' %
+                    project_filename, Qgis.Critical)
 
             old_dir = os.getcwd()
             os.chdir(project_folder)
 
             gem_log('calc2map: chdir("%s")' % project_folder, Qgis.Critical)
 
-            zipdir('%s.zip' % project_folder, '.')
+            archive_pathname = '%s.zip' % project_folder
+            zipdir(archive_pathname, '.')
             os.chdir(old_dir)
 
-            rmdir_recursive(project_folder)
+            # rmdir_recursive(project_folder)
 
             gem_log('calc2map: post project zip', Qgis.Critical)
 
             response.setStatusCode(200)
             response.write(
-                json.dumps({'owner': 'mop', 'test': project.fileName()},
+                json.dumps({'owner': 'mop',
+                            'uploaded_file': os.path.basename(
+                                archive_pathname)},
                            indent=4, sort_keys=True))
         finally:
             release_lock(lock_filename)
