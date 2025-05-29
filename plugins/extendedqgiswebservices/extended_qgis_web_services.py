@@ -29,7 +29,7 @@ from qgis.core import (
     QgsRasterLayer, QgsProject, QgsVectorLayer, QgsVectorFileWriter,
     QgsField, edit, QgsFeature, QgsPointXY, QgsGeometry,
     QgsReferencedRectangle, QgsSymbol, QgsGradientColorRamp,
-    QgsGraduatedSymbolRenderer,
+    QgsGraduatedSymbolRenderer, QgsCoordinateTransform,
     QgsApplication, QgsStyle, NULL)
 from qgis.PyQt.QtGui import QColor
 from qgis.PyQt.QtCore import QVariant
@@ -556,11 +556,17 @@ class EWMS(QgsService):
 
             # Set coordinate reference system
             # crs = QgsCoordinateReferenceSystem("EPSG:4326")
-            canvas.setDestinationCrs(layer.crs())
+            canvas.setDestinationCrs(project.crs())
 
             # Set extent
             # extent = ref_rect  # QgsRectangle(-180, -90, 180, 90)
-            canvas.setExtent(extent)
+
+            layer_extent = extent
+            source_crs = layer.crs()
+            dest_crs = project.crs()
+            transform = QgsCoordinateTransform(source_crs, dest_crs, project)
+            transformed_extent = transform.transformBoundingBox(layer_extent)
+            canvas.setExtent(transformed_extent)
 
             #
             #  save qgis project
