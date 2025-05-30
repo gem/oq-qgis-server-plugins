@@ -88,7 +88,7 @@ DEFAULT_SETTINGS = dict(
 
 def _style_curves(layer, style_by):
     use_sgc_style = False
-    opacity = 0.7
+    opacity = 1.0
 
     symbol = QgsSymbol.defaultSymbol(layer.geometryType())
     symbol.setOpacity(opacity)
@@ -108,11 +108,6 @@ def _style_curves(layer, style_by):
     ramp_type_idx = default_color_ramp_names.index('Spectral')
     inverted = True
     symbol.setColor(QColor(RAMP_EXTREME_COLORS['Reds']['top']))
-
-    ramp = default_qgs_style.colorRamp(
-        default_color_ramp_names[ramp_type_idx])
-    if inverted:
-        ramp.invert()
 
     ramp = default_qgs_style.colorRamp(
         default_color_ramp_names[ramp_type_idx])
