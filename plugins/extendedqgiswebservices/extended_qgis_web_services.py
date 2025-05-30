@@ -32,35 +32,13 @@ from qgis.core import (
     QgsGraduatedSymbolRenderer, QgsCoordinateTransform,
     QgsApplication, QgsStyle, NULL)
 from qgis.PyQt.QtGui import QColor
-from qgis.PyQt.QtCore import QVariant
-
-
-
-
-
-from qgis.core import QgsCoordinateReferenceSystem
+from qgis.PyQt.QtCore import QVariant, QSize
 from qgis.gui import QgsMapCanvas
-from qgis.PyQt.QtCore import QSize
-from qgis.core import QgsRectangle
-
-
-
-
-
-
-# from qgis.PyQt.QtCore import QSize
-# from qgis.core import (
-#     QgsApplication,
-#     QgsMapSettings,
-#     QgsRectangle,
-#     QgsCoordinateReferenceSystem
-# )
-# from qgis.gui import QgsMapCanvas
-
 
 from .svir_utils.shared import RAMP_EXTREME_COLORS
 from .svir_utils.utils import get_style
 
+# FIXME reenable folder deletion after zip creation
 from .gem_common import gem_log, rmdir_recursive, alphanum_rndstr
 from .lock import acquire_lock, release_lock
 from .zipdir import zipdir
@@ -582,7 +560,7 @@ class EWMS(QgsService):
             zipdir(archive_pathname, '.')
             os.chdir(old_dir)
 
-            # rmdir_recursive(project_folder)
+            # FIXME rmdir_recursive(project_folder)
 
             gem_log('calc2map: post project zip', Qgis.Critical)
 
