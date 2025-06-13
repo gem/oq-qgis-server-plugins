@@ -30,10 +30,18 @@ from qgis.core import (
     QgsField, edit, QgsFeature, QgsPointXY, QgsGeometry,
     QgsReferencedRectangle, QgsSymbol, QgsGradientColorRamp,
     QgsGraduatedSymbolRenderer, QgsCoordinateTransform,
-    QgsApplication, QgsStyle, NULL)
+    QgsApplication, QgsStyle, NULL,
+    QgsProcessingFeedback, QgsProcessingContext,
+    QgsProcessingAlgRunnerTask, QgsWkbTypes,
+    QgsFeatureRequest, QgsProcessingFeatureSourceDefinition,
+)
+
+
 from qgis.PyQt.QtGui import QColor
-from qgis.PyQt.QtCore import QVariant, QSize
+from qgis.PyQt.QtCore import QVariant, QMetaType, QSize
 from qgis.gui import QgsMapCanvas
+
+import processing
 
 from .svir_utils.shared import RAMP_EXTREME_COLORS
 from .svir_utils.utils import get_style
@@ -189,6 +197,13 @@ class EWMS(QgsService):
                 response.setStatusCode(500)
                 response.write("An error occurred: %s" % exc)
                 response.close()
+        elif request.parameters()['REQUEST'] == 'OQEngineGroupingTest':
+            try:
+                self._oq_engine_grouping_test(request, response, project)
+            except Exception as exc:
+                response.setStatusCode(500)
+                response.write("An error occurred: %s" % exc)
+                response.close()
         else:
             response.setStatusCode(400)
             response.write("Missing or invalid 'REQUEST' parameter")
@@ -337,6 +352,137 @@ class EWMS(QgsService):
         response.write(
             json.dumps(styles_by_layer, indent=4, sort_keys=True))
 
+    def _oq_engine_grouping_test(self, request, response, project):
+        def create_layer_from_selected(source_layer):
+            """Create a new layer containing only selected features"""
+            if source_layer.selectedFeatureCount() == 0:
+                print("No features selected!")
+                return None
+
+            # Create memory layer with same CRS and geometry type
+            geom_type = QgsWkbTypes.displayString(source_layer.wkbType())
+            crs = source_layer.crs().authid()
+            temp_layer = QgsVectorLayer(f'{geom_type}?crs={crs}', 'selected_features', 'memory')
+
+            # Copy selected features
+            temp_provider = temp_layer.dataProvider()
+            selected_features = list(source_layer.getSelectedFeatures())
+            temp_provider.addFeatures(selected_features)
+            temp_layer.updateExtents()
+
+            return temp_layer
+
+        
+        response.setStatusCode(200)
+        if processing is None:
+            print('Processing is None')
+        else:
+            print('Processing available')
+
+        processing.Processing.initialize()
+        alg = QgsApplication.processingRegistry().algorithmById(
+            'qgis:joinbylocationsummary')
+        if alg is None:
+            print('Alg is None')
+        else:
+            print('Alg available')
+
+        context = QgsProcessingContext()
+        feedback = QgsProcessingFeedback()
+
+        points_uri = (
+            '/home/nastasi/git/oq-geoviewer/oqgeoviewer/media/uploads/'
+            'projects/2012-emilia-romagna-10-gmfs-damage-and-risk_cgA0lvKw/'
+            'layers/'
+            '2012-emilia-romagna-10-gmfs-damage-and-risk_PGA_cgA0lvKw.gpkg')
+        
+        points_layer = QgsVectorLayer(points_uri, 'emilia-romagna-10-PGA',
+                                      'ogr')
+        
+        zonal_uri = ('/home/nastasi/git/oq-geoviewer/oqgeoviewer/media/'
+                     'uploads/subdivision_areas/italy_adm2.gpkg')
+        
+        zonal_layer = QgsVectorLayer(zonal_uri, 'italy_adm2', 'ogr')
+
+        zonal_layer.selectAll()
+
+        group_layer = processing.run(
+            "native:saveselectedfeatures",
+            {'INPUT': zonal_layer, 'OUTPUT': 'memory:'})['OUTPUT']
+        zonal_layer.removeSelection()
+
+        # create destination layer making a copy of regions layer and adding a
+        # couple of fields
+        group_layer.startEditing()
+        group_layer.addAttribute(QgsField('value', QMetaType.Type.Double))
+        group_layer.addAttribute(QgsField('json_info', QMetaType.Type.QString))
+        group_layer.commitChanges()
+
+        # zonal_layer = QgsVectorLayer(gpkg_filepath, 'italy_adm2', 'ogr')
+        zonal_layer = group_layer
+
+        # loop on group layer and, for each feature select layer points features and
+        # process them
+        zonal_layer.removeSelection()
+        zonal_layer.startEditing()
+        for zonal_feat in zonal_layer.getFeatures():
+            points_layer.removeSelection()
+            zonal_layer.selectByIds([zonal_feat.id()])
+
+            temp_layer = create_layer_from_selected(zonal_layer)
+
+            result = processing.run("native:selectbylocation", {
+                'INPUT': points_layer,
+                'PREDICATE': [0],  # 0 = intersects
+                'INTERSECT': temp_layer,
+                # 'INTERSECT': QgsProcessingFeatureSourceDefinition(
+                #     zonal_layer.dataProvider().dataSourceUri(),
+                #     selectedFeaturesOnly=True,
+                #     featureLimit=-1,
+                #     geometryCheck=QgsFeatureRequest.GeometryAbortOnInvalid
+                #   ),
+                'METHOD': 0,
+                'SELECTED_FEATURES_ONLY': True,
+            })
+
+            if temp_layer and temp_layer.id() in QgsProject.instance().mapLayers():
+                QgsProject.instance().removeMapLayer(temp_layer.id())
+        
+            # Or simply delete the layer object
+            if temp_layer:
+                del temp_layer
+
+            # if 'OUTPUT' in result:
+            if len(points_layer.selectedFeatureIds()) > 0:
+                print('N FEATS: %d' % len(
+                    points_layer.selectedFeatureIds()))
+            else:
+                zonal_layer.removeSelection()
+                zonal_layer.deleteFeature(zonal_feat.id())
+                print('N FEATS: ZERO')
+            zonal_layer.removeSelection()
+        zonal_layer.commitChanges()
+        
+        # Save layer as GeoPackage
+        save_options = QgsVectorFileWriter.SaveVectorOptions()
+        save_options.driverName = "GPKG"
+        layer_name = 'italy_adm2_plus'
+        save_options.layerName = 'italy_adm2_plus'
+
+        gpkg_filepath = (
+            f'/home/nastasi/git/oq-geoviewer/oqgeoviewer/media/'
+            f'uploads/{layer_name}2.gpkg')
+
+        gem_log('calc2map: pre layer save [%s]' % gpkg_filepath,
+                Qgis.Critical)
+        error = QgsVectorFileWriter.writeAsVectorFormat(
+            group_layer, gpkg_filepath,
+            "UTF-8", group_layer.crs(), "GPKG",
+            layerOptions=['OVERWRITE=YES'])
+
+        response.write(
+            json.dumps({'status': 'success'}, indent=4, sort_keys=True))
+
     def _oq_engine_calc2map(self, request, response, project):
         os.umask(0o0002)
         # Get the project instance
@@ -446,7 +592,7 @@ class EWMS(QgsService):
                 # Add fields to the layer
                 layer.dataProvider().addAttributes([
                     # QgsField("id", QVariant.Int),
-                    QgsField(imt, QVariant.Double)
+                    QgsField(imt, QMetaType.Type.Double)
                 ])
                 layer.updateFields()
 
