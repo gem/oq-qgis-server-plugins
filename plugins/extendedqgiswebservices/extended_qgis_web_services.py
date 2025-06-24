@@ -353,6 +353,8 @@ class EWMS(QgsService):
             json.dumps(styles_by_layer, indent=4, sort_keys=True))
 
     def _oq_engine_grouping_test(self, request, response, project):
+        project = QgsProject.instance()
+
         def create_layer_from_selected(source_layer):
             """Create a new layer containing only selected features"""
             if source_layer.selectedFeatureCount() == 0:
@@ -371,6 +373,62 @@ class EWMS(QgsService):
             temp_layer.updateExtents()
 
             return temp_layer
+
+
+
+        # Clean current project
+        project.clear()
+
+        for i in range(0, 5):
+            # rnd_sfx = alphanum_rndstr(8)
+            description = 'hardcabled'
+            rnd_sfx = 'notrandom'
+            project_name = '%s_%s' % (description, rnd_sfx)
+            # FIXME
+            # lock_filename = '/io/uploads/projects/%s.lock' % project_name
+            lock_filename = '/home/nastasi/git/oq-geoviewer/oqgeoviewer/media/uploads/projects/%s.lock' % project_name
+            if acquire_lock(lock_filename):
+                break
+            break
+        else:
+            gem_log('calc2map: lock of %s failed' % lock_filename,
+                    Qgis.Critical)
+            response.setStatusCode(500)
+            response.write('calc2map: lock of %s failed' % lock_filename)
+            return
+
+            gem_log('calc2map: lock acquired %s' % lock_filename,
+                    Qgis.Critical)
+
+        # this 'try:' is to be able to unlock the locked file at the end of
+        # project creation procedure
+
+        # try:
+        
+        # Load another project
+        # FIXME project.read('/io/data/_templates/PapersTmpl.qgs')
+        project.read('/home/nastasi/git/oq-geoviewer/oqgeoviewer/data/qgis/_templates/Papers/PapersTmpl.qgs')
+        gem_log('calc2map: project name: %s' % project.fileName(),
+                Qgis.Critical)
+
+        # mkdir of base for all files of the project
+        # FIXME project_folder = '/io/uploads/projects/%s' % project_name
+        project_folder = '/home/nastasi/git/oq-geoviewer/oqgeoviewer/media/uploads/projects/%s' % project_name
+        layer_folder = '%s/layers' % project_folder
+        try:
+            os.mkdir(project_folder)
+        except FileExistsError:
+            pass
+        try:
+            os.mkdir(layer_folder)
+        except FileExistsError:
+            pass
+
+        # except Exception:
+        #     response.setStatusCode(500)
+        #    response.write('grouptest: error')
+        #     return
+
 
         
         response.setStatusCode(200)
@@ -391,9 +449,8 @@ class EWMS(QgsService):
         feedback = QgsProcessingFeedback()
 
         points_uri = (
-            '/home/nastasi/git/oq-geoviewer/oqgeoviewer/media/uploads/'
-            'projects/2012-emilia-romagna-10-gmfs-damage-and-risk_2t4HHRRs/'
-            'layers/2012-emilia-romagna-10-gmfs-damage-and-risk_PGA_2t4HHRRs.gpkg')
+            '/home/nastasi/git/oq-geoviewer/project_samples/papers/'
+            'avg_damages_mean/layers/output-75-avg_damages-mean_13.gpkg')
         
         points_layer = QgsVectorLayer(points_uri, 'emilia-romagna-10-PGA',
                                       'ogr')
@@ -403,27 +460,39 @@ class EWMS(QgsService):
         
         zonal_layer = QgsVectorLayer(zonal_uri, 'italy_adm2', 'ogr')
 
-        zonal_layer.selectAll()
-
-        group_layer = processing.run(
-            "native:saveselectedfeatures",
-            {'INPUT': zonal_layer, 'OUTPUT': 'memory:'})['OUTPUT']
+        # zonal_layer.selectAll()
         zonal_layer.removeSelection()
 
+        complete_damage_lay = QgsVectorLayer(
+            'Polygon?crs=epsg:3857', 'complete_damage', 'memory')
+        complete_damage_dp = complete_damage_lay.dataProvider()
+        complete_damage_lay.startEditing()
+        complete_damage_lay.addAttribute(QgsField('value', QMetaType.Type.Double))
+        complete_damage_lay.addAttribute(QgsField('json_info', QMetaType.Type.QString))
+        complete_damage_lay.commitChanges()
+
+        economic_losses_lay = QgsVectorLayer(
+            'Polygon?crs=epsg:3857', 'economic_losses', 'memory')
+        economic_losses_lay.startEditing()
+        economic_losses_lay.addAttribute(QgsField('value', QMetaType.Type.Double))
+        economic_losses_lay.addAttribute(QgsField('json_info', QMetaType.Type.QString))
+        economic_losses_lay.commitChanges()
+        economic_losses_dp = economic_losses_lay.dataProvider()
+        
+        fatalities_lay = QgsVectorLayer(
+            'Polygon?crs=epsg:3857', 'fatalities', 'memory')
+        fatalities_lay.startEditing()
+        fatalities_lay.addAttribute(QgsField('value', QMetaType.Type.Double))
+        fatalities_lay.addAttribute(QgsField('json_info', QMetaType.Type.QString))
+        fatalities_lay.commitChanges()
+        fatalities_dp = fatalities_lay.dataProvider()
+        
         # create destination layer making a copy of regions layer and adding a
         # couple of fields
-        group_layer.startEditing()
-        group_layer.addAttribute(QgsField('value', QMetaType.Type.Double))
-        group_layer.addAttribute(QgsField('json_info', QMetaType.Type.QString))
-        group_layer.commitChanges()
 
-        # zonal_layer = QgsVectorLayer(gpkg_filepath, 'italy_adm2', 'ogr')
-        zonal_layer = group_layer
 
         # loop on group layer and, for each feature select layer points features and
         # process them
-        zonal_layer.removeSelection()
-        zonal_layer.startEditing()
         for zonal_feat in zonal_layer.getFeatures():
             points_layer.removeSelection()
             zonal_layer.selectByIds([zonal_feat.id()])
@@ -444,6 +513,7 @@ class EWMS(QgsService):
                 'SELECTED_FEATURES_ONLY': True,
             })
 
+            # Remove temporary layer 
             if temp_layer and temp_layer.id() in QgsProject.instance().mapLayers():
                 QgsProject.instance().removeMapLayer(temp_layer.id())
         
@@ -455,29 +525,113 @@ class EWMS(QgsService):
             if len(points_layer.selectedFeatureIds()) > 0:
                 print('N FEATS: %d' % len(
                     points_layer.selectedFeatureIds()))
+                # loop to populate new entry for metrics here
+
+                complete_damage_sum = 0
+                economic_losses_sum = 0
+                fatalities_sum = 0
+
+                for feat in points_layer.selectedFeatures():
+                    # print([x for x in feat])
+                    # FIXME: avoid with a set() use the same point more than one time
+                    complete_damage_sum += feat['structural-complete']
+                    economic_losses_sum += feat['structural-losses']
+                    fatalities_sum += feat['structural-fatalities']
+                # print(f"cdam: {complete_damage_sum}, ecloss: {economic_losses_sum},"
+                #       f" fatal: {fatalities_sum}")
+
+                for out_lay, out_dp, out_sum, out_name in [
+                        (complete_damage_lay, complete_damage_dp, complete_damage_sum, 'complete_damage'),
+                        (economic_losses_lay, economic_losses_dp, economic_losses_sum, 'economic_losses'),
+                        (fatalities_lay, fatalities_dp, fatalities_sum, 'fatalities')]:
+                    if out_sum == 0.0:
+                        continue
+                    with edit(out_lay):
+                        fea = QgsFeature(out_lay.fields())
+                        fea.setGeometry(zonal_feat.geometry())
+                        fea.setAttributes([float(out_sum), 'json_todo'])
+                        out_dp.addFeatures([fea])
             else:
-                zonal_layer.removeSelection()
-                zonal_layer.deleteFeature(zonal_feat.id())
                 print('N FEATS: ZERO')
             zonal_layer.removeSelection()
-        zonal_layer.commitChanges()
-        
-        # Save layer as GeoPackage
-        save_options = QgsVectorFileWriter.SaveVectorOptions()
-        save_options.driverName = "GPKG"
-        layer_name = 'italy_adm2_plus'
-        save_options.layerName = 'italy_adm2_plus'
 
-        gpkg_filepath = (
-            f'/home/nastasi/git/oq-geoviewer/oqgeoviewer/media/'
-            f'uploads/{layer_name}2.gpkg')
+        for out_lay, out_name in [
+                (complete_damage_lay, 'complete_damage'),
+                (economic_losses_lay, 'economic_losses'),
+                (fatalities_lay, 'fatalities')]:
+            out_lay.selectAll()
+            # Save layer as GeoPackage
+            # save_options = QgsVectorFileWriter.SaveVectorOptions()
+            # save_options.driverName = "GPKG"
+            layer_name = f'{out_name}_plus'
+            # save_options.layerName = f'{out_name}_adm2'
 
-        gem_log('calc2map: pre layer save [%s]' % gpkg_filepath,
-                Qgis.Critical)
-        error = QgsVectorFileWriter.writeAsVectorFormat(
-            group_layer, gpkg_filepath,
-            "UTF-8", group_layer.crs(), "GPKG",
-            layerOptions=['OVERWRITE=YES'])
+            out_lay.updateExtents()
+            
+            gpkg_filepath = '%s/%s_%s.gpkg' % (
+                layer_folder, out_name, rnd_sfx)
+
+            # gpkg_filepath = (
+            #     f'/home/nastasi/git/oq-geoviewer/oqgeoviewer/media/'
+            #     f'uploads/{out_name}_adm2.gpkg')
+
+            gem_log('calc2map: pre layer save [%s]' % gpkg_filepath,
+                    Qgis.Critical)
+            error = QgsVectorFileWriter.writeAsVectorFormat(
+                out_lay, gpkg_filepath,
+                "UTF-8", out_lay.crs(), "GPKG",
+                layerOptions=['OVERWRITE=YES'])
+            print('calc2map: post layer save')
+
+
+
+
+
+            out_real_layer = QgsVectorLayer(gpkg_filepath, out_name, 'ogr')
+
+            # _style_curves(out_real_layer, out_name)
+
+                # add gpkg layer to current QGIS project
+            project.addMapLayer(out_real_layer)
+
+            extent = out_real_layer.extent()
+            ref_rect = QgsReferencedRectangle(extent, out_real_layer.crs())
+            vs_project = project.viewSettings()
+            vs_project.setDefaultViewExtent(ref_rect)
+
+        gem_log('calc2map: pre project save', Qgis.Critical)
+
+        # Create canvas
+        canvas = QgsMapCanvas()
+        canvas.setObjectName("theMapCanvas")
+        # Set canvas size
+        canvas.resize(QSize(800, 600))
+
+        # FIXME: set proper values
+
+        # Set coordinate reference system
+        # crs = QgsCoordinateReferenceSystem("EPSG:4326")
+        canvas.setDestinationCrs(project.crs())
+
+        # Set extent
+        # extent = ref_rect  # QgsRectangle(-180, -90, 180, 90)
+
+        layer_extent = extent
+        source_crs = out_lay.crs()
+        dest_crs = project.crs()
+        transform = QgsCoordinateTransform(source_crs, dest_crs, project)
+        transformed_extent = transform.transformBoundingBox(layer_extent)
+        canvas.setExtent(transformed_extent)
+
+        #
+        #  save qgis project
+        #
+        project_filepath = '%s/%s.qgs' % (project_folder, project_name)
+        project.write(project_filepath)
+        project_filename = project.fileName()
+        project.clear()
+        gem_log('calc2map: post project save, filename [%s]' %
+                project_filename, Qgis.Critical)
 
         response.write(
             json.dumps({'status': 'success'}, indent=4, sort_keys=True))
