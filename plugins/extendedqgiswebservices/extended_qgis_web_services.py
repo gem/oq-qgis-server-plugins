@@ -392,9 +392,8 @@ class EWMS(QgsService):
 
         points_uri = (
             '/home/nastasi/git/oq-geoviewer/oqgeoviewer/media/uploads/'
-            'projects/2012-emilia-romagna-10-gmfs-damage-and-risk_cgA0lvKw/'
-            'layers/'
-            '2012-emilia-romagna-10-gmfs-damage-and-risk_PGA_cgA0lvKw.gpkg')
+            'projects/2012-emilia-romagna-10-gmfs-damage-and-risk_2t4HHRRs/'
+            'layers/2012-emilia-romagna-10-gmfs-damage-and-risk_PGA_2t4HHRRs.gpkg')
         
         points_layer = QgsVectorLayer(points_uri, 'emilia-romagna-10-PGA',
                                       'ogr')
