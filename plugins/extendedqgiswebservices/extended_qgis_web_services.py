@@ -713,7 +713,7 @@ class EWMS(QgsService):
         # project creation procedure
         try:
             # Load another project
-            project.read('/io/uploads/templates/PapersTmpl.qgs')
+            project.read('/io/data/_templates/Papers/PapersTmpl.qgs')
             gem_log('calc2map: project name: %s' % project.fileName(),
                     Qgis.Critical)
 
@@ -722,7 +722,7 @@ class EWMS(QgsService):
             layer_folder = '%s/layers' % project_folder
             os.mkdir(project_folder)
             os.mkdir(layer_folder)
-            for imt in imts:
+            for imt in imts[::-1]:
                 resp = session.get(
                     '%s/v1/calc/%d/extract/avg_gmf?imt=%s' % (
                         engine_url, int(calc_id), imt),
