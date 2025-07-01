@@ -694,8 +694,8 @@ class EWMS(QgsService):
 
     def _oq_engine_calc2map(self, request, response, project):
         calculation_mode = request.parameter('CALCULATION_MODE')
-        method = getattr(self, '_oq_engine_calc2map_%s' % calculation_mode)
-        if not hasattr(self, method):
+        method_name = '_oq_engine_calc2map_%s' % calculation_mode
+        if not hasattr(self, method_name):
             response.setStatusCode(400)
             response.write(
                 json.dumps({'status': 'fail',
@@ -703,11 +703,11 @@ class EWMS(QgsService):
                             calculation_mode}, indent=4, sort_keys=True))
             return
 
+        method = getattr(self, method_name)
+        
         return method(request, response, project)
 
     def _oq_engine_calc2map_scenario(self, request, response, project):
-        print('HERE WE ARE')
-        return
         # calculation_mode: 'scenario' or 'scenario_damage'
         os.umask(0o0002)
         # Get the project instance
@@ -815,6 +815,8 @@ class EWMS(QgsService):
                 layer = QgsVectorLayer("Point", imt, "memory")
 
                 # Add fields to the layer
+                print('IMT')
+                print(imt)
                 layer.dataProvider().addAttributes([
                     # QgsField("id", QVariant.Int),
                     QgsField(imt, QMetaType.Type.Double)
