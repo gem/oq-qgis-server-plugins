@@ -352,6 +352,11 @@ class EWMS(QgsService):
         response.write(
             json.dumps(styles_by_layer, indent=4, sort_keys=True))
 
+    ##
+    ##
+    ##    TEST
+    ##
+    ##
     def _oq_engine_grouping_test(self, request, response, project):
         project = QgsProject.instance()
 
@@ -404,7 +409,7 @@ class EWMS(QgsService):
         # project creation procedure
 
         # try:
-        
+
         # Load another project
         # FIXME project.read('/io/data/_templates/PapersTmpl.qgs')
         project.read('/home/nastasi/git/oq-geoviewer/oqgeoviewer/data/qgis/_templates/Papers/PapersTmpl.qgs')
@@ -430,7 +435,7 @@ class EWMS(QgsService):
         #     return
 
 
-        
+
         response.setStatusCode(200)
         if processing is None:
             print('Processing is None')
@@ -451,13 +456,13 @@ class EWMS(QgsService):
         points_uri = (
             '/home/nastasi/git/oq-geoviewer/project_samples/papers/'
             'avg_damages_mean/layers/output-75-avg_damages-mean_13.gpkg')
-        
+
         points_layer = QgsVectorLayer(points_uri, 'emilia-romagna-10-PGA',
                                       'ogr')
-        
+
         zonal_uri = ('/home/nastasi/git/oq-geoviewer/oqgeoviewer/media/'
                      'uploads/subdivision_areas/italy_adm2.gpkg')
-        
+
         zonal_layer = QgsVectorLayer(zonal_uri, 'italy_adm2', 'ogr')
 
         # zonal_layer.selectAll()
@@ -478,7 +483,7 @@ class EWMS(QgsService):
         economic_losses_lay.addAttribute(QgsField('json_info', QMetaType.Type.QString))
         economic_losses_lay.commitChanges()
         economic_losses_dp = economic_losses_lay.dataProvider()
-        
+
         fatalities_lay = QgsVectorLayer(
             'Polygon?crs=epsg:3857', 'fatalities', 'memory')
         fatalities_lay.startEditing()
@@ -486,7 +491,7 @@ class EWMS(QgsService):
         fatalities_lay.addAttribute(QgsField('json_info', QMetaType.Type.QString))
         fatalities_lay.commitChanges()
         fatalities_dp = fatalities_lay.dataProvider()
-        
+
         # create destination layer making a copy of regions layer and adding a
         # couple of fields
 
@@ -513,10 +518,10 @@ class EWMS(QgsService):
                 'SELECTED_FEATURES_ONLY': True,
             })
 
-            # Remove temporary layer 
+            # Remove temporary layer
             if temp_layer and temp_layer.id() in QgsProject.instance().mapLayers():
                 QgsProject.instance().removeMapLayer(temp_layer.id())
-        
+
             # Or simply delete the layer object
             if temp_layer:
                 del temp_layer
@@ -528,37 +533,60 @@ class EWMS(QgsService):
                 # loop to populate new entry for metrics here
 
                 complete_damage_sum = 0
+                complete_damage_maggr = {}
                 economic_losses_sum = 0
+                economic_losses_maggr = {}
                 fatalities_sum = 0
+                fatalities_maggr = {}
 
                 for feat in points_layer.selectedFeatures():
                     # print([x for x in feat])
                     # FIXME: avoid with a set() use the same point more than one time
                     complete_damage_sum += feat['structural-complete']
+                    macro_tax = feat['MACRO_TAXONOMY']
+                    if macro_tax in complete_damage_maggr:
+                        complete_damage_maggr[macro_tax] += feat['structural-complete']
+                    else:
+                        complete_damage_maggr[macro_tax] = feat['structural-complete']
+
                     economic_losses_sum += feat['structural-losses']
+                    if macro_tax in economic_losses_maggr:
+                        economic_losses_maggr[macro_tax] += feat['structural-losses']
+                    else:
+                        economic_losses_maggr[macro_tax] = feat['structural-losses']
+
+
                     fatalities_sum += feat['structural-fatalities']
+                    if macro_tax in fatalities_maggr:
+                        fatalities_maggr[macro_tax] += feat['structural-fatalities']
+                    else:
+                        fatalities_maggr[macro_tax] = feat['structural-fatalities']
+
                 # print(f"cdam: {complete_damage_sum}, ecloss: {economic_losses_sum},"
                 #       f" fatal: {fatalities_sum}")
 
-                for out_lay, out_dp, out_sum, out_name in [
-                        (complete_damage_lay, complete_damage_dp, complete_damage_sum, 'complete_damage'),
-                        (economic_losses_lay, economic_losses_dp, economic_losses_sum, 'economic_losses'),
-                        (fatalities_lay, fatalities_dp, fatalities_sum, 'fatalities')]:
+                for out_lay, out_dp, out_sum, out_json, out_name in [
+                        (complete_damage_lay, complete_damage_dp, complete_damage_sum, complete_damage_maggr, 'complete_damage'),
+                        (economic_losses_lay, economic_losses_dp, economic_losses_sum, economic_losses_maggr, 'economic_losses'),
+                        (fatalities_lay, fatalities_dp, fatalities_sum, fatalities_maggr, 'fatalities')]:
                     if out_sum == 0.0:
                         continue
                     with edit(out_lay):
                         fea = QgsFeature(out_lay.fields())
                         fea.setGeometry(zonal_feat.geometry())
-                        fea.setAttributes([float(out_sum), 'json_todo'])
+                        fea.setAttributes([float(out_sum), json.dumps(out_json)])
                         out_dp.addFeatures([fea])
             else:
                 print('N FEATS: ZERO')
             zonal_layer.removeSelection()
 
-        for out_lay, out_name in [
-                (complete_damage_lay, 'complete_damage'),
-                (economic_losses_lay, 'economic_losses'),
-                (fatalities_lay, 'fatalities')]:
+        default_qgs_style = QgsStyle().defaultStyle()
+        default_color_ramp_names = default_qgs_style.colorRampNames()
+        style_mode = 'Jenks'
+        for out_lay, out_name, out_ramp in [
+                (complete_damage_lay, 'complete_damage', 'Blues'),
+                (economic_losses_lay, 'economic_losses', 'Reds'),
+                (fatalities_lay, 'fatalities', 'Greens')]:
             out_lay.selectAll()
             # Save layer as GeoPackage
             # save_options = QgsVectorFileWriter.SaveVectorOptions()
@@ -567,7 +595,7 @@ class EWMS(QgsService):
             # save_options.layerName = f'{out_name}_adm2'
 
             out_lay.updateExtents()
-            
+
             gpkg_filepath = '%s/%s_%s.gpkg' % (
                 layer_folder, out_name, rnd_sfx)
 
@@ -583,11 +611,38 @@ class EWMS(QgsService):
                 layerOptions=['OVERWRITE=YES'])
             print('calc2map: post layer save')
 
-
-
-
-
             out_real_layer = QgsVectorLayer(gpkg_filepath, out_name, 'ogr')
+            symbol = QgsSymbol.defaultSymbol(out_real_layer.geometryType())
+            symbol.setOpacity(1)
+            ramp_type_idx = default_color_ramp_names.index(out_ramp)
+            symbol.setColor(QColor(RAMP_EXTREME_COLORS[out_ramp]['top']))
+
+            ramp = default_qgs_style.colorRamp(
+                default_color_ramp_names[ramp_type_idx])
+
+            # ramp.invert() (to switch colors)
+
+            # get unique values
+            fni = out_real_layer.fields().indexOf('value')
+            unique_values = out_real_layer.dataProvider().uniqueValues(fni)
+            num_unique_values = len(unique_values - {NULL})
+
+            renderer = QgsGraduatedSymbolRenderer(
+                'value', [])
+            # NOTE: the following returns an instance of one of the
+            #       subclasses of QgsClassificationMethod
+            classification_method = \
+                QgsApplication.classificationMethodRegistry().method(
+                    style_mode)
+            renderer.setClassificationMethod(classification_method)
+            renderer.updateColorRamp(ramp)
+            renderer.updateSymbols(symbol.clone())
+            renderer.updateClasses(
+                out_real_layer, min(num_unique_values, 7))
+            out_real_layer.setRenderer(renderer)
+            out_real_layer.triggerRepaint()
+
+
 
             # _style_curves(out_real_layer, out_name)
 
@@ -623,6 +678,7 @@ class EWMS(QgsService):
         transformed_extent = transform.transformBoundingBox(layer_extent)
         canvas.setExtent(transformed_extent)
 
+        canvas.refresh()
         #
         #  save qgis project
         #
@@ -637,6 +693,22 @@ class EWMS(QgsService):
             json.dumps({'status': 'success'}, indent=4, sort_keys=True))
 
     def _oq_engine_calc2map(self, request, response, project):
+        calculation_mode = request.parameter('CALCULATION_MODE')
+        method = getattr(self, '_oq_engine_calc2map_%s' % calculation_mode)
+        if not hasattr(self, method):
+            response.setStatusCode(400)
+            response.write(
+                json.dumps({'status': 'fail',
+                            'reason': 'no rules to produce maps for calculation_mode "%s".' %
+                            calculation_mode}, indent=4, sort_keys=True))
+            return
+
+        return method(request, response, project)
+
+    def _oq_engine_calc2map_scenario(self, request, response, project):
+        print('HERE WE ARE')
+        return
+        # calculation_mode: 'scenario' or 'scenario_damage'
         os.umask(0o0002)
         # Get the project instance
         project = QgsProject.instance()
