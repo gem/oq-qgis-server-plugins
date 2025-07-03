@@ -26,14 +26,14 @@ import tempfile
 from requests import Session
 
 from qgis.core import Qgis
-from qgis.server import QgsService, QgsServerProjectUtils
+from qgis.server import QgsService, QgsServerProjectUtils, QgsServerSettings
 from qgis.core import (
     QgsRasterLayer, QgsProject, QgsVectorLayer, QgsVectorFileWriter,
     QgsField, edit, QgsFeature, QgsPointXY, QgsGeometry,
     QgsReferencedRectangle, QgsSymbol, QgsGradientColorRamp,
     QgsGraduatedSymbolRenderer, QgsCoordinateTransform,
     QgsApplication, QgsStyle, NULL,
-    QgsWkbTypes
+    QgsWkbTypes, QgsLogger
 )
 
 
@@ -618,41 +618,34 @@ class EWMS(QgsService):
     def _oq_engine_calc2map_scenario_damage(self, request, response, project, engine_url):
         # Get the project instance
         project = QgsProject.instance()
-        # Print the current project file name (might be
-        # empty in case no projects have been loaded)
-        # print(project.fileName())
 
-        # create random prefix to avoid clash names
-
-        gem_log('calc2map_scenario_damage', Qgis.Critical)
+        gem_log('calc2map_scenario_damage:BEGIN', Qgis.Info)
         calc_id = request.parameter('CALC_ID')
         description = request.parameter('DESCRIPTION')
 
         session = Session()
 
-        # engine_login(hostname, None, None, session)
-
-        gem_log('calc2map: pre get', Qgis.Critical)
-
         oqparam_req = '%s/v1/calc/%d/results' % (
             engine_url, int(calc_id),)
-        gem_log('calc2map: pre oq-param: [%s]' % oqparam_req, Qgis.Critical)
+        gem_log('calc2map: pre oq-param: [%s]' % oqparam_req, Qgis.Info)
         resp = session.get(
             oqparam_req, timeout=100, verify=False, allow_redirects=False)
 
-        gem_log('calc2map: post oq-param', Qgis.Critical)
+        gem_log('calc2map: post oq-param', Qgis.Info)
         calc = [x for x in json.load(io.BytesIO(resp.content)) if x['type'] == 'damages-stats']
         if len(calc) != 1:
             response.setStatusCode(500)
             response.write("calc2map: 'damages-stats' output not found")
             return
 
+        # retrieve damages-stats output
         resp = session.get("%s?export_type=csv" % calc[0]['url'],
                            timeout=100, verify=False, allow_redirects=False)
 
         # Clean current project
         project.clear()
 
+        # create random prefix to avoid clash names
         for i in range(0, 5):
             rnd_sfx = alphanum_rndstr(8)
             project_name = '%s_%s' % (description, rnd_sfx)
@@ -667,14 +660,15 @@ class EWMS(QgsService):
             return
 
         gem_log('calc2map: lock acquired %s' % lock_filename,
-                Qgis.Critical)
+                Qgis.Info)
 
 
-        # this 'try:' is to be able to unlock the locked file at the end of
+        # this 'try...finally' is to be able to unlock the locked file at the end of
         # project creation procedure and remove temporary csv file
         try:
             fp_out = tempfile.NamedTemporaryFile(mode="w", delete=False)
             fp_in = io.StringIO(resp.text)
+            # skip info header
             next(fp_in)
             csv_in = csv.DictReader(fp_in)
             fieldnames = ['lon', 'lat', 'MACRO_TAXONOMY', 'structural-complete',
@@ -685,6 +679,7 @@ class EWMS(QgsService):
                 csv_out.writerow({name: row_in[name] for name in fieldnames})
             fp_out.close()
 
+            # create VectorLayer from filtered CSV file
             lines_to_skip_count = 0
             url = QUrl.fromLocalFile(fp_out.name)
             # url = QUrl("%s" % calc[0]['url'])
@@ -703,47 +698,38 @@ class EWMS(QgsService):
             url_query.addQueryItem('export_type', 'csv')
             url.setQuery(url_query)
             layer_uri = url.toString()
-            print(layer_uri)
+            gem_log('calc2map: layer uri: [%s]' % layer_uri, Qgis.Info)
             points_layer_csv = QgsVectorLayer(layer_uri, 'points_layer', 'delimitedtext')
 
+            # create a in-memory layer copy for performance reason
             points_layer_csv.selectAll()
             points_layer = _create_layer_from_selected(points_layer_csv, with_attributes=True)
             points_layer_csv.removeSelection()
-            # layer = convert_to_mem_layer_and_cast_bool_fields_to_int(layer)
 
             if not points_layer.isValid():
-                raise RuntimeError('Unable to load layer')
+                response.setStatusCode(500)
+                response.write("calc2map: 'Unable to copy points_layer'")
+                return
 
             # Load another project
             project.read('/io/data/_templates/Papers/PapersTmpl.qgs')
             gem_log('calc2map: project name: %s' % project.fileName(),
-                    Qgis.Critical)
+                    Qgis.Info)
 
             # mkdir of base for all files of the project
             project_folder = '/io/uploads/projects/%s' % project_name
             layer_folder = '%s/layers' % project_folder
-            os.mkdir(project_folder)
-            os.mkdir(layer_folder)
-
-            if processing is None:
-                print('Processing is None')
-            else:
-                print('Processing available')
+            os.makedirs(project_folder)
+            os.makedirs(layer_folder)
 
             processing.Processing.initialize()
-            alg = QgsApplication.processingRegistry().algorithmById(
-                'qgis:joinbylocationsummary')
-            if alg is None:
-                print('Alg is None')
-            else:
-                print('Alg available')
 
+            # INFO: here to change adm level if required
             zonal_uri = ('/io/uploads/subdivision_areas/italy_adm2.gpkg')
             zonal_layer = QgsVectorLayer(zonal_uri, 'italy_adm2', 'ogr')
 
-            # zonal_layer.selectAll()
-            zonal_layer.removeSelection()
-
+            # create destination layer making a copy of regions layer and adding a
+            # couple of fields
             complete_damage_lay = QgsVectorLayer(
                 'Polygon?crs=epsg:4326', 'Complete Damage', 'memory')
             complete_damage_dp = complete_damage_lay.dataProvider()
@@ -768,14 +754,10 @@ class EWMS(QgsService):
             fatalities_lay.commitChanges()
             fatalities_dp = fatalities_lay.dataProvider()
 
-
-            # create destination layer making a copy of regions layer and adding a
-            # couple of fields
-
-
             # sequence to avoid usage of sites multiple times when on regions border
             grouped_sites = set()
 
+            server_settings = QgsServerSettings()
             # loop on group layer and, for each feature select layer points features and
             # process them
             for zonal_feat in zonal_layer.getFeatures():
@@ -784,6 +766,7 @@ class EWMS(QgsService):
 
                 temp_layer = _create_layer_from_selected(zonal_layer)
 
+                # select sites intersect with single feature temp layer
                 processing.run("native:selectbylocation", {
                     'INPUT': points_layer,
                     'PREDICATE': [0],  # 0 = intersects
@@ -801,11 +784,13 @@ class EWMS(QgsService):
                     del temp_layer
 
                 # if 'OUTPUT' in result:
-                if len(points_layer.selectedFeatureIds()) > 0:
-                    print('N FEATS: %d' % len(
-                        points_layer.selectedFeatureIds()))
-                    # loop to populate new entry for metrics here
+                if points_layer.selectedFeatureIds():
+                    if server_settings.logLevel() <= Qgis.Info:
+                        gem_log('N FEATS: %d' % len(
+                            points_layer.selectedFeatureIds()),
+                                Qgis.Info)
 
+                    # loop to populate new entry for metrics here
                     complete_damage_sum = 0
                     complete_damage_maggr = {}
                     economic_losses_sum = 0
