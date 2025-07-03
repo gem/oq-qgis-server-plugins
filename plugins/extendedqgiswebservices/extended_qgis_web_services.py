@@ -960,7 +960,8 @@ class EWMS(QgsService):
             zipdir(archive_pathname, '.')
             os.chdir(old_dir)
 
-            # FIXME rmdir_recursive(project_folder)
+            if os.getenv('GEM_GV_KEEP_CALC_PROJECT', False) is False:
+                rmdir_recursive(project_folder)
 
             gem_log('calc2map: post project zip', Qgis.Critical)
 
@@ -1343,7 +1344,8 @@ class EWMS(QgsService):
             zipdir(archive_pathname, '.')
             os.chdir(old_dir)
 
-            # FIXME rmdir_recursive(project_folder)
+            if os.getenv('GEM_GV_KEEP_CALC_PROJECT', False) is False:
+                rmdir_recursive(project_folder)
 
             gem_log('calc2map: post project zip', Qgis.Critical)
 
