@@ -19,8 +19,12 @@
 
 import io
 import os
+import sys
+import csv
+import time
 import numpy
 import json
+import tempfile
 from requests import Session
 
 from qgis.core import Qgis
@@ -38,7 +42,7 @@ from qgis.core import (
 
 
 from qgis.PyQt.QtGui import QColor
-from qgis.PyQt.QtCore import QVariant, QMetaType, QSize
+from qgis.PyQt.QtCore import QVariant, QMetaType, QSize, QUrl, QUrlQuery
 from qgis.gui import QgsMapCanvas
 
 import processing
@@ -70,6 +74,34 @@ DEFAULT_SETTINGS = dict(
     developer_mode=False,
     log_level='C',
 )
+
+def _create_layer_from_selected(source_layer, with_attributes=False):
+    """Create a new layer containing only selected features"""
+    if source_layer.selectedFeatureCount() == 0:
+        print("No features selected!")
+        return None
+
+    # Create memory layer with same CRS and geometry type
+    geom_type = QgsWkbTypes.displayString(source_layer.wkbType())
+    crs = source_layer.crs().authid()
+    temp_layer = QgsVectorLayer(f'{geom_type}?crs={crs}', 'selected_features', 'memory')
+
+    temp_provider = temp_layer.dataProvider()
+    temp_provider.createSpatialIndex()
+    if with_attributes:
+        temp_layer.startEditing()
+        temp_provider.addAttributes(source_layer.fields())
+        temp_layer.updateFields()
+        temp_layer.commitChanges()
+
+    # Copy selected features
+    selected_features = list(source_layer.getSelectedFeatures())
+    temp_provider.addFeatures(selected_features)
+    temp_layer.updateExtents()
+
+    return temp_layer
+
+
 
 
 def _style_curves(layer, style_by):
@@ -492,6 +524,8 @@ class EWMS(QgsService):
         fatalities_lay.commitChanges()
         fatalities_dp = fatalities_lay.dataProvider()
 
+
+
         # create destination layer making a copy of regions layer and adding a
         # couple of fields
 
@@ -580,6 +614,7 @@ class EWMS(QgsService):
                 print('N FEATS: ZERO')
             zonal_layer.removeSelection()
 
+
         default_qgs_style = QgsStyle().defaultStyle()
         default_color_ramp_names = default_qgs_style.colorRampNames()
         style_mode = 'Jenks'
@@ -591,7 +626,7 @@ class EWMS(QgsService):
             # Save layer as GeoPackage
             # save_options = QgsVectorFileWriter.SaveVectorOptions()
             # save_options.driverName = "GPKG"
-            layer_name = f'{out_name}_plus'
+            layer_name = f'{out_name}'
             # save_options.layerName = f'{out_name}_adm2'
 
             out_lay.updateExtents()
@@ -654,6 +689,10 @@ class EWMS(QgsService):
             vs_project = project.viewSettings()
             vs_project.setDefaultViewExtent(ref_rect)
 
+
+
+
+
         gem_log('calc2map: pre project save', Qgis.Critical)
 
         # Create canvas
@@ -693,6 +732,7 @@ class EWMS(QgsService):
             json.dumps({'status': 'success'}, indent=4, sort_keys=True))
 
     def _oq_engine_calc2map(self, request, response, project):
+        # calculation_mode: 'scenario' or 'scenario_damage'
         calculation_mode = request.parameter('CALCULATION_MODE')
         method_name = '_oq_engine_calc2map_%s' % calculation_mode
         if not hasattr(self, method_name):
@@ -704,11 +744,10 @@ class EWMS(QgsService):
             return
 
         method = getattr(self, method_name)
-        
+
         return method(request, response, project)
 
     def _oq_engine_calc2map_scenario(self, request, response, project):
-        # calculation_mode: 'scenario' or 'scenario_damage'
         os.umask(0o0002)
         # Get the project instance
         project = QgsProject.instance()
@@ -734,15 +773,6 @@ class EWMS(QgsService):
         # engine_login(hostname, None, None, session)
 
         gem_log('calc2map: pre get', Qgis.Critical)
-        gem_log('calc2map: [%s]' % ('%s/v1/calc/list' % engine_url),
-                Qgis.Critical)
-        # retrieve list of calculations
-        resp = session.get(
-            '%s/v1/calc/list' % engine_url, timeout=10, verify=False,
-            allow_redirects=False)
-
-        gem_log('calc2map: post get', Qgis.Critical)
-
         oqparam_req = '%s/v1/calc/%d/extract/oqparam' % (
             engine_url, int(calc_id),)
         gem_log('calc2map: pre oq-param: [%s]' % oqparam_req, Qgis.Critical)
@@ -815,11 +845,8 @@ class EWMS(QgsService):
                 layer = QgsVectorLayer("Point", imt, "memory")
 
                 # Add fields to the layer
-                print('IMT')
-                print(imt)
                 layer.dataProvider().addAttributes([
-                    # QgsField("id", QVariant.Int),
-                    QgsField(imt, QMetaType.Type.Double)
+                    QgsField(imt, QVariant.Double)
                 ])
                 layer.updateFields()
 
@@ -945,6 +972,394 @@ class EWMS(QgsService):
                            indent=4, sort_keys=True))
         finally:
             release_lock(lock_filename)
+
+    def _oq_engine_calc2map_scenario_damage(self, request, response, project):
+        print("PYTHON VERSION: %s" % sys.version)
+        os.umask(0o0002)
+        # Get the project instance
+        project = QgsProject.instance()
+        # Print the current project file name (might be
+        # empty in case no projects have been loaded)
+        # print(project.fileName())
+
+        # create random prefix to avoid clash names
+
+        gem_log('calc2map_scenario_damage', Qgis.Critical)
+        calc_id = request.parameter('CALC_ID')
+        description = request.parameter('DESCRIPTION')
+
+        # hostname = 'http://127.0.0.1:8800'
+        eng_proto = 'http'
+        eng_name = 'host.docker.internal'
+        eng_port = '8800'
+        engine_url = '%s://%s:%s' % (eng_proto, eng_name, eng_port)
+
+        session = Session()
+
+        # engine_login(hostname, None, None, session)
+
+        gem_log('calc2map: pre get', Qgis.Critical)
+
+        oqparam_req = '%s/v1/calc/%d/results' % (
+            engine_url, int(calc_id),)
+        gem_log('calc2map: pre oq-param: [%s]' % oqparam_req, Qgis.Critical)
+        resp = session.get(
+            oqparam_req, timeout=100, verify=False, allow_redirects=False)
+
+        gem_log('calc2map: post oq-param', Qgis.Critical)
+        calc = [x for x in json.load(io.BytesIO(resp.content)) if x['type'] == 'damages-stats']
+        if len(calc) != 1:
+            response.setStatusCode(500)
+            response.write("calc2map: 'damages-stats' output not found")
+            return
+
+        resp = session.get("%s?export_type=csv" % calc[0]['url'],
+                           timeout=100, verify=False, allow_redirects=False)
+
+        # Clean current project
+        project.clear()
+
+        for i in range(0, 5):
+            rnd_sfx = alphanum_rndstr(8)
+            project_name = '%s_%s' % (description, rnd_sfx)
+            lock_filename = '/io/uploads/projects/%s.lock' % project_name
+            if acquire_lock(lock_filename):
+                break
+        else:
+            gem_log('calc2map: lock of %s failed' % lock_filename,
+                    Qgis.Critical)
+            response.setStatusCode(500)
+            response.write('calc2map: lock of %s failed' % lock_filename)
+            return
+
+        gem_log('calc2map: lock acquired %s' % lock_filename,
+                Qgis.Critical)
+
+
+        # this 'try:' is to be able to unlock the locked file at the end of
+        # project creation procedure and remove temporary csv file
+        try:
+            fp_out = tempfile.NamedTemporaryFile(mode="w", delete=False)
+            fp_in = io.StringIO(resp.text)
+            next(fp_in)
+            csv_in = csv.DictReader(fp_in)
+            fieldnames = ['lon', 'lat', 'MACRO_TAXONOMY', 'structural-complete',
+                          'structural-losses', 'structural-fatalities']
+            csv_out = csv.DictWriter(fp_out, fieldnames)
+            csv_out.writeheader()
+            for row_in in csv_in:
+                csv_out.writerow({name: row_in[name] for name in fieldnames})
+            fp_out.close()
+
+            lines_to_skip_count = 0
+            url = QUrl.fromLocalFile(fp_out.name)
+            # url = QUrl("%s" % calc[0]['url'])
+            url_query = QUrlQuery()
+            url_query.addQueryItem('type', 'csv')
+            url_query.addQueryItem('xField', 'lon')
+            url_query.addQueryItem('yField', 'lat')
+            url_query.addQueryItem('spatialIndex', 'yes')
+            # url_query.addQueryItem('crs', 'epsg:4326')
+            url_query.addQueryItem('subsetIndex', 'no')
+            url_query.addQueryItem('watchFile', 'no')
+            url_query.addQueryItem('delimiter', ',')
+            url_query.addQueryItem('quote', '"')
+            url_query.addQueryItem('skipLines', str(lines_to_skip_count))
+            url_query.addQueryItem('trimFields', 'yes')
+            url_query.addQueryItem('export_type', 'csv')
+            url.setQuery(url_query)
+            layer_uri = url.toString()
+            print(layer_uri)
+            points_layer_csv = QgsVectorLayer(layer_uri, 'points_layer', 'delimitedtext')
+
+            points_layer_csv.selectAll()
+            points_layer = _create_layer_from_selected(points_layer_csv, with_attributes=True)
+            points_layer_csv.removeSelection()
+            # layer = convert_to_mem_layer_and_cast_bool_fields_to_int(layer)
+
+            if not points_layer.isValid():
+                raise RuntimeError('Unable to load layer')
+
+            # Load another project
+            project.read('/io/data/_templates/Papers/PapersTmpl.qgs')
+            gem_log('calc2map: project name: %s' % project.fileName(),
+                    Qgis.Critical)
+
+            # mkdir of base for all files of the project
+            project_folder = '/io/uploads/projects/%s' % project_name
+            layer_folder = '%s/layers' % project_folder
+            os.mkdir(project_folder)
+            os.mkdir(layer_folder)
+
+            if processing is None:
+                print('Processing is None')
+            else:
+                print('Processing available')
+
+            processing.Processing.initialize()
+            alg = QgsApplication.processingRegistry().algorithmById(
+                'qgis:joinbylocationsummary')
+            if alg is None:
+                print('Alg is None')
+            else:
+                print('Alg available')
+
+            context = QgsProcessingContext()
+            feedback = QgsProcessingFeedback()
+
+            zonal_uri = ('/io/uploads/subdivision_areas/italy_adm2.gpkg')
+            zonal_layer = QgsVectorLayer(zonal_uri, 'italy_adm2', 'ogr')
+
+            # zonal_layer.selectAll()
+            zonal_layer.removeSelection()
+
+            complete_damage_lay = QgsVectorLayer(
+                #    'Polygon?crs=epsg:3857', 'complete_damage', 'memory')
+                'Polygon?crs=epsg:4326', 'complete_damage', 'memory')
+            complete_damage_dp = complete_damage_lay.dataProvider()
+            complete_damage_lay.startEditing()
+            complete_damage_lay.addAttribute(QgsField('value', QVariant.Double))
+            complete_damage_lay.addAttribute(QgsField('json_info', QVariant.String))
+            complete_damage_lay.commitChanges()
+
+            economic_losses_lay = QgsVectorLayer(
+                # 'Polygon?crs=epsg:3857', 'economic_losses', 'memory')
+                'Polygon?crs=epsg:4326', 'economic_losses', 'memory')
+            economic_losses_lay.startEditing()
+            economic_losses_lay.addAttribute(QgsField('value', QVariant.Double))
+            economic_losses_lay.addAttribute(QgsField('json_info', QVariant.String))
+            economic_losses_lay.commitChanges()
+            economic_losses_dp = economic_losses_lay.dataProvider()
+
+            fatalities_lay = QgsVectorLayer(
+                # 'Polygon?crs=epsg:3857', 'fatalities', 'memory')
+                'Polygon?crs=epsg:4326', 'fatalities', 'memory')
+            fatalities_lay.startEditing()
+            fatalities_lay.addAttribute(QgsField('value', QVariant.Double))
+            fatalities_lay.addAttribute(QgsField('json_info', QVariant.String))
+            fatalities_lay.commitChanges()
+            fatalities_dp = fatalities_lay.dataProvider()
+
+
+            # create destination layer making a copy of regions layer and adding a
+            # couple of fields
+
+
+            # loop on group layer and, for each feature select layer points features and
+            # process them
+            for zonal_feat in zonal_layer.getFeatures():
+                points_layer.removeSelection()
+                zonal_layer.selectByIds([zonal_feat.id()])
+
+                temp_layer = _create_layer_from_selected(zonal_layer)
+
+                result = processing.run("native:selectbylocation", {
+                    'INPUT': points_layer,
+                    'PREDICATE': [0],  # 0 = intersects
+                    'INTERSECT': temp_layer,
+                    'METHOD': 0,
+                    'SELECTED_FEATURES_ONLY': True,
+                })
+
+                # Remove temporary layer
+                if temp_layer and temp_layer.id() in QgsProject.instance().mapLayers():
+                    QgsProject.instance().removeMapLayer(temp_layer.id())
+
+                # Or simply delete the layer object
+                if temp_layer:
+                    del temp_layer
+
+                # if 'OUTPUT' in result:
+                if len(points_layer.selectedFeatureIds()) > 0:
+                    print('N FEATS: %d' % len(
+                        points_layer.selectedFeatureIds()))
+                    # loop to populate new entry for metrics here
+
+                    complete_damage_sum = 0
+                    complete_damage_maggr = {}
+                    economic_losses_sum = 0
+                    economic_losses_maggr = {}
+                    fatalities_sum = 0
+                    fatalities_maggr = {}
+
+                    for feat in points_layer.selectedFeatures():
+                        # print([x for x in feat])
+                        #
+                        #  FIXME: avoid with a set() use the same point more than one time
+                        #
+                        complete_damage_sum += feat['structural-complete']
+                        macro_tax = feat['MACRO_TAXONOMY']
+                        if macro_tax in complete_damage_maggr:
+                            complete_damage_maggr[macro_tax] += feat['structural-complete']
+                        else:
+                            complete_damage_maggr[macro_tax] = feat['structural-complete']
+
+                        economic_losses_sum += feat['structural-losses']
+                        if macro_tax in economic_losses_maggr:
+                            economic_losses_maggr[macro_tax] += feat['structural-losses']
+                        else:
+                            economic_losses_maggr[macro_tax] = feat['structural-losses']
+
+
+                        fatalities_sum += feat['structural-fatalities']
+                        if macro_tax in fatalities_maggr:
+                            fatalities_maggr[macro_tax] += feat['structural-fatalities']
+                        else:
+                            fatalities_maggr[macro_tax] = feat['structural-fatalities']
+
+                    # print(f"cdam: {complete_damage_sum}, ecloss: {economic_losses_sum},"
+                    #       f" fatal: {fatalities_sum}")
+
+                    for out_lay, out_dp, out_sum, out_json, out_name in [
+                            (complete_damage_lay, complete_damage_dp, complete_damage_sum, complete_damage_maggr, 'complete_damage'),
+                            (economic_losses_lay, economic_losses_dp, economic_losses_sum, economic_losses_maggr, 'economic_losses'),
+                            (fatalities_lay, fatalities_dp, fatalities_sum, fatalities_maggr, 'fatalities')]:
+                        if out_sum == 0.0:
+                            continue
+                        with edit(out_lay):
+                            fea = QgsFeature(out_lay.fields())
+                            fea.setGeometry(zonal_feat.geometry())
+                            fea.setAttributes([float(out_sum), json.dumps(out_json)])
+                            out_dp.addFeatures([fea])
+                else:
+                    print('N FEATS: ZERO')
+                zonal_layer.removeSelection()
+
+            default_qgs_style = QgsStyle().defaultStyle()
+            default_color_ramp_names = default_qgs_style.colorRampNames()
+            style_mode = 'Jenks'
+            real_lays = []
+            for out_lay, out_name, out_ramp in [
+                    (complete_damage_lay, 'complete_damage', 'Blues'),
+                    (economic_losses_lay, 'economic_losses', 'Reds'),
+                    (fatalities_lay, 'fatalities', 'Greens')]:
+                out_lay.startEditing()
+                out_lay.selectAll()
+                # Save layer as GeoPackage
+                # save_options = QgsVectorFileWriter.SaveVectorOptions()
+                # save_options.driverName = "GPKG"
+                layer_name = f'{out_name}'
+                # save_options.layerName = f'{out_name}_adm2'
+
+                out_lay.updateExtents()
+
+                gpkg_filepath = '%s/%s_%s.gpkg' % (
+                    layer_folder, out_name, rnd_sfx)
+
+                gem_log('calc2map: pre layer save [%s]' % gpkg_filepath,
+                        Qgis.Critical)
+                out_lay.commitChanges()
+                error = QgsVectorFileWriter.writeAsVectorFormat(
+                    out_lay, gpkg_filepath,
+                    "UTF-8", out_lay.crs(), "GPKG",
+                    layerOptions=['OVERWRITE=YES'])
+                print('calc2map: post layer save')
+
+                out_real_layer = QgsVectorLayer(gpkg_filepath, out_name, 'ogr')
+                real_lays.append(out_real_layer)
+                symbol = QgsSymbol.defaultSymbol(out_real_layer.geometryType())
+                symbol.setOpacity(1)
+                ramp_type_idx = default_color_ramp_names.index(out_ramp)
+                symbol.setColor(QColor(RAMP_EXTREME_COLORS[out_ramp]['top']))
+
+                ramp = default_qgs_style.colorRamp(
+                    default_color_ramp_names[ramp_type_idx])
+
+                # ramp.invert() (to switch colors)
+
+                # get unique values
+                fni = out_real_layer.fields().indexOf('value')
+                unique_values = out_real_layer.dataProvider().uniqueValues(fni)
+                num_unique_values = len(unique_values - {NULL})
+
+                renderer = QgsGraduatedSymbolRenderer(
+                    'value', [])
+                # NOTE: the following returns an instance of one of the
+                #       subclasses of QgsClassificationMethod
+                classification_method = \
+                    QgsApplication.classificationMethodRegistry().method(
+                        style_mode)
+                renderer.setClassificationMethod(classification_method)
+                renderer.updateColorRamp(ramp)
+                renderer.updateSymbols(symbol.clone())
+                renderer.updateClasses(
+                    out_real_layer, min(num_unique_values, 7))
+                out_real_layer.setRenderer(renderer)
+                out_real_layer.triggerRepaint()
+
+                # _style_curves(out_real_layer, out_name)
+
+                    # add gpkg layer to current QGIS project
+                project.addMapLayer(out_real_layer)
+
+                extent = out_real_layer.extent()
+                ref_rect = QgsReferencedRectangle(extent, out_real_layer.crs())
+                vs_project = project.viewSettings()
+                vs_project.setDefaultViewExtent(ref_rect)
+
+            gem_log('calc2map: pre project save', Qgis.Critical)
+
+            # Create canvas
+            canvas = QgsMapCanvas()
+            canvas.setObjectName("theMapCanvas")
+            # Set canvas size
+            canvas.resize(QSize(800, 600))
+
+            # FIXME: set proper values
+
+            # Set coordinate reference system
+            # crs = QgsCoordinateReferenceSystem("EPSG:4326")
+            canvas.setDestinationCrs(project.crs())
+
+            # Set extent
+            # extent = ref_rect  # QgsRectangle(-180, -90, 180, 90)
+
+            layer_extent = extent
+            source_crs = out_lay.crs()
+            dest_crs = project.crs()
+            transform = QgsCoordinateTransform(source_crs, dest_crs, project)
+            transformed_extent = transform.transformBoundingBox(layer_extent)
+            canvas.setExtent(transformed_extent)
+
+            canvas.refresh()
+
+
+            #
+            #  save qgis project
+            #
+            project_filepath = '%s/%s.qgs' % (project_folder, project_name)
+            project.write(project_filepath)
+
+            project.clear()
+
+            # gem_log('calc2map: post project save, filename [%s]' %
+            #         project_filename, Qgis.Critical)
+            old_dir = os.getcwd()
+            os.chdir(project_folder)
+
+            gem_log('calc2map: chdir("%s")' % project_folder, Qgis.Critical)
+
+            archive_pathname = '%s.zip' % project_folder
+            zipdir(archive_pathname, '.')
+            os.chdir(old_dir)
+
+            # FIXME rmdir_recursive(project_folder)
+
+            gem_log('calc2map: post project zip', Qgis.Critical)
+
+            response.setStatusCode(200)
+            response.write(
+                json.dumps({'owner': 'mop',
+                            'uploaded_file': os.path.basename(
+                                archive_pathname)},
+                           indent=4, sort_keys=True))
+
+        finally:
+            if os.path.exists(fp_out.name):
+                os.unlink(fp_out.name)
+            release_lock(lock_filename)
+        return;
+
 
 
 class EWM():
