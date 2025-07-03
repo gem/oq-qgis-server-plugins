@@ -759,8 +759,7 @@ class EWMS(QgsService):
             zonal_layer.removeSelection()
 
             complete_damage_lay = QgsVectorLayer(
-                #    'Polygon?crs=epsg:3857', 'complete_damage', 'memory')
-                'Polygon?crs=epsg:4326', 'complete_damage', 'memory')
+                'Polygon?crs=epsg:4326', 'Complete Damage', 'memory')
             complete_damage_dp = complete_damage_lay.dataProvider()
             complete_damage_lay.startEditing()
             complete_damage_lay.addAttribute(QgsField('value', QVariant.Double))
@@ -768,8 +767,7 @@ class EWMS(QgsService):
             complete_damage_lay.commitChanges()
 
             economic_losses_lay = QgsVectorLayer(
-                # 'Polygon?crs=epsg:3857', 'economic_losses', 'memory')
-                'Polygon?crs=epsg:4326', 'economic_losses', 'memory')
+                'Polygon?crs=epsg:4326', 'Economic Losses', 'memory')
             economic_losses_lay.startEditing()
             economic_losses_lay.addAttribute(QgsField('value', QVariant.Double))
             economic_losses_lay.addAttribute(QgsField('json_info', QVariant.String))
@@ -777,8 +775,7 @@ class EWMS(QgsService):
             economic_losses_dp = economic_losses_lay.dataProvider()
 
             fatalities_lay = QgsVectorLayer(
-                # 'Polygon?crs=epsg:3857', 'fatalities', 'memory')
-                'Polygon?crs=epsg:4326', 'fatalities', 'memory')
+                'Polygon?crs=epsg:4326', 'Fatalities', 'memory')
             fatalities_lay.startEditing()
             fatalities_lay.addAttribute(QgsField('value', QVariant.Double))
             fatalities_lay.addAttribute(QgsField('json_info', QVariant.String))
@@ -882,9 +879,9 @@ class EWMS(QgsService):
             style_mode = 'Jenks'
             real_lays = []
             for out_lay, out_name, out_ramp in [
-                    (complete_damage_lay, 'complete_damage', 'Blues'),
-                    (economic_losses_lay, 'economic_losses', 'Reds'),
-                    (fatalities_lay, 'fatalities', 'Greens')]:
+                    (complete_damage_lay, 'Complete Damage', 'Blues'),
+                    (economic_losses_lay, 'Economic Losses', 'Reds'),
+                    (fatalities_lay, 'Fatalities', 'Greens')]:
                 out_lay.startEditing()
                 out_lay.selectAll()
                 # Save layer as GeoPackage
