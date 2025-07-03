@@ -1146,6 +1146,9 @@ class EWMS(QgsService):
             # couple of fields
 
 
+            # sequence to avoid usage of sites multiple times when on regions border
+            grouped_sites = set()
+
             # loop on group layer and, for each feature select layer points features and
             # process them
             for zonal_feat in zonal_layer.getFeatures():
@@ -1184,6 +1187,10 @@ class EWMS(QgsService):
                     fatalities_maggr = {}
 
                     for feat in points_layer.selectedFeatures():
+                        if feat.id() in grouped_sites:
+                            continue
+                        else:
+                            grouped_sites.add(feat.id())
                         # print([x for x in feat])
                         #
                         #  FIXME: avoid with a set() use the same point more than one time
