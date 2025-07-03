@@ -19,9 +19,7 @@
 
 import io
 import os
-import sys
 import csv
-import time
 import numpy
 import json
 import tempfile
@@ -35,14 +33,12 @@ from qgis.core import (
     QgsReferencedRectangle, QgsSymbol, QgsGradientColorRamp,
     QgsGraduatedSymbolRenderer, QgsCoordinateTransform,
     QgsApplication, QgsStyle, NULL,
-    QgsProcessingFeedback, QgsProcessingContext,
-    QgsProcessingAlgRunnerTask, QgsWkbTypes,
-    QgsFeatureRequest, QgsProcessingFeatureSourceDefinition,
+    QgsWkbTypes
 )
 
 
 from qgis.PyQt.QtGui import QColor
-from qgis.PyQt.QtCore import QVariant, QMetaType, QSize, QUrl, QUrlQuery
+from qgis.PyQt.QtCore import QVariant, QSize, QUrl, QUrlQuery
 from qgis.gui import QgsMapCanvas
 
 import processing
@@ -389,11 +385,16 @@ class EWMS(QgsService):
                             calculation_mode}, indent=4, sort_keys=True))
             return
 
+        eng_proto = 'http'
+        eng_name = 'host.docker.internal'
+        eng_port = '8800'
+        engine_url = '%s://%s:%s' % (eng_proto, eng_name, eng_port)
+
         method = getattr(self, method_name)
 
-        return method(request, response, project)
+        return method(request, response, project, engine_url)
 
-    def _oq_engine_calc2map_scenario(self, request, response, project):
+    def _oq_engine_calc2map_scenario(self, request, response, project, engine_url):
         os.umask(0o0002)
         # Get the project instance
         project = QgsProject.instance()
@@ -407,12 +408,6 @@ class EWMS(QgsService):
         calc_id = request.parameter('CALC_ID')
         description = request.parameter('DESCRIPTION')
         imts = request.parameter('IMTS').split(',')
-
-        # hostname = 'http://127.0.0.1:8800'
-        eng_proto = 'http'
-        eng_name = 'host.docker.internal'
-        eng_port = '8800'
-        engine_url = '%s://%s:%s' % (eng_proto, eng_name, eng_port)
 
         session = Session()
 
@@ -620,7 +615,7 @@ class EWMS(QgsService):
         finally:
             release_lock(lock_filename)
 
-    def _oq_engine_calc2map_scenario_damage(self, request, response, project):
+    def _oq_engine_calc2map_scenario_damage(self, request, response, project, engine_url):
         # Get the project instance
         project = QgsProject.instance()
         # Print the current project file name (might be
@@ -632,12 +627,6 @@ class EWMS(QgsService):
         gem_log('calc2map_scenario_damage', Qgis.Critical)
         calc_id = request.parameter('CALC_ID')
         description = request.parameter('DESCRIPTION')
-
-        # hostname = 'http://127.0.0.1:8800'
-        eng_proto = 'http'
-        eng_name = 'host.docker.internal'
-        eng_port = '8800'
-        engine_url = '%s://%s:%s' % (eng_proto, eng_name, eng_port)
 
         session = Session()
 
@@ -749,9 +738,6 @@ class EWMS(QgsService):
             else:
                 print('Alg available')
 
-            context = QgsProcessingContext()
-            feedback = QgsProcessingFeedback()
-
             zonal_uri = ('/io/uploads/subdivision_areas/italy_adm2.gpkg')
             zonal_layer = QgsVectorLayer(zonal_uri, 'italy_adm2', 'ogr')
 
@@ -798,7 +784,7 @@ class EWMS(QgsService):
 
                 temp_layer = _create_layer_from_selected(zonal_layer)
 
-                result = processing.run("native:selectbylocation", {
+                processing.run("native:selectbylocation", {
                     'INPUT': points_layer,
                     'PREDICATE': [0],  # 0 = intersects
                     'INTERSECT': temp_layer,
@@ -878,27 +864,22 @@ class EWMS(QgsService):
             default_color_ramp_names = default_qgs_style.colorRampNames()
             style_mode = 'Jenks'
             real_lays = []
-            for out_lay, out_name, out_ramp in [
-                    (complete_damage_lay, 'Complete Damage', 'Blues'),
-                    (economic_losses_lay, 'Economic Losses', 'Reds'),
-                    (fatalities_lay, 'Fatalities', 'Greens')]:
+            for out_lay, out_filename, out_name, out_ramp in [
+                    (complete_damage_lay, 'complete_damage', 'Complete Damage', 'Blues'),
+                    (economic_losses_lay, 'economic_losses', 'Economic Losses', 'Reds'),
+                    (fatalities_lay, 'fatalities', 'Fatalities', 'Greens')]:
                 out_lay.startEditing()
                 out_lay.selectAll()
-                # Save layer as GeoPackage
-                # save_options = QgsVectorFileWriter.SaveVectorOptions()
-                # save_options.driverName = "GPKG"
-                layer_name = f'{out_name}'
-                # save_options.layerName = f'{out_name}_adm2'
 
                 out_lay.updateExtents()
 
                 gpkg_filepath = '%s/%s_%s.gpkg' % (
-                    layer_folder, out_name, rnd_sfx)
+                    layer_folder, out_filename, rnd_sfx)
 
                 gem_log('calc2map: pre layer save [%s]' % gpkg_filepath,
                         Qgis.Critical)
                 out_lay.commitChanges()
-                error = QgsVectorFileWriter.writeAsVectorFormat(
+                QgsVectorFileWriter.writeAsVectorFormat(
                     out_lay, gpkg_filepath,
                     "UTF-8", out_lay.crs(), "GPKG",
                     layerOptions=['OVERWRITE=YES'])
