@@ -639,8 +639,8 @@ class EWMS(QgsService):
             return
 
         # retrieve damages-stats output
-        resp = session.get("%s?export_type=csv" % calc[0]['url'],
-                           timeout=100, verify=False, allow_redirects=False)
+        resp = session.get("%s" % calc[0]['url'],
+                           timeout=600, verify=False, allow_redirects=False)
 
         # Clean current project
         project.clear()
