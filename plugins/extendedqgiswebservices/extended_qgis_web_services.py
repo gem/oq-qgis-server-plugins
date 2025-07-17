@@ -20,9 +20,11 @@
 import io
 import os
 import csv
+import math
 import numpy
 import json
 import tempfile
+import bisect
 from requests import Session
 
 from qgis.core import Qgis
@@ -31,9 +33,9 @@ from qgis.core import (
     QgsRasterLayer, QgsProject, QgsVectorLayer, QgsVectorFileWriter,
     QgsField, edit, QgsFeature, QgsPointXY, QgsGeometry,
     QgsReferencedRectangle, QgsSymbol, QgsGradientColorRamp,
-    QgsGraduatedSymbolRenderer, QgsCoordinateTransform,
-    QgsApplication, QgsStyle, NULL,
-    QgsWkbTypes, QgsLogger
+    QgsGraduatedSymbolRenderer, QgsRuleBasedRenderer, QgsCoordinateTransform,
+    QgsApplication, QgsStyle, QgsFillSymbol, NULL,
+    QgsWkbTypes, QgsLogger, QgsClassificationJenks, QgsClassificationRange
 )
 
 
@@ -616,6 +618,10 @@ class EWMS(QgsService):
             release_lock(lock_filename)
 
     def _oq_engine_calc2map_scenario_damage(self, request, response, project, engine_url):
+
+        # number of classified classes
+        CLASSIFIED_CLASSES = 7
+
         # Get the project instance
         project = QgsProject.instance()
 
@@ -845,14 +851,77 @@ class EWMS(QgsService):
                     print('N FEATS: ZERO')
                 zonal_layer.removeSelection()
 
+            #
+            #  Analize data to create custom symbology < 1.0 + N groups with same numerosity
+            #
+            lays_values = {}
+            lays_classes = {}
+            for out_lay, out_filename, out_name, out_ramp in [
+                    (complete_damage_lay, 'complete_damage', 'Complete Damage', 'Blues'),
+                    (economic_losses_lay, 'economic_losses', 'Economic Losses', 'Reds'),
+                    (fatalities_lay, 'fatalities', 'Fatalities', 'Greens')]:
+                lays_values[out_filename] = []
+                out_lay.selectAll()
+                lay_values = lays_values[out_filename]
+                attr_idx = -1
+                # populate an ordered list of values
+                for feat in out_lay.selectedFeatures():
+                    if attr_idx < 0:
+                        attr_idx = feat.fieldNameIndex('value')
+                    bisect.insort(lay_values, float(feat.attributes()[attr_idx]))
+
+                # identify the first value greater than one
+                lt_one_idx = -1
+                for idx, value in enumerate(lay_values):
+                    if value > 1.0:
+                        break
+                    lt_one_idx = idx
+
+                classified_classes_n = CLASSIFIED_CLASSES
+                if lt_one_idx == -1:
+                    # no lt_one case
+                    classified_values = iter(lay_values)
+                else:
+                    # some elements has less than one value
+
+                    classified_values = iter(lay_values[lt_one_idx:])
+                    classified_classes_n -= 1
+
+                cl_jenks = QgsClassificationJenks()
+                cla = cl_jenks.classes(classified_values, classified_classes_n)
+                lay_classes_float = (
+                     cla if lt_one_idx == -1 else
+                     [QgsClassificationRange('<= 1', float('-inf'), 1.0)] + cla)
+
+                # create ceiled (integers as limits) ranges
+                lay_classes = lays_classes[out_filename] = []
+                for lay_class in lay_classes_float:
+                    if lay_class.lowerBound() == float('-inf'):
+                        lay_classes.append(lay_class)
+                        last_upper = int(lay_class.upperBound())  # 1.0
+                        continue
+
+                    upper = math.ceil(lay_class.upperBound())
+                    if upper == last_upper:
+                        # if current class fit into the same ceiled upper-bounded
+                        # range it will be skipped
+                        continue
+
+                    lower = last_upper
+                    lay_classes.append(QgsClassificationRange(
+                        "%s - %s" % (
+                            f'{lower:,}', f'{upper:,}'),
+                        lower, upper))
+                    last_upper = upper
+
             default_qgs_style = QgsStyle().defaultStyle()
             default_color_ramp_names = default_qgs_style.colorRampNames()
-            style_mode = 'Jenks'
             real_lays = []
             for out_lay, out_filename, out_name, out_ramp in [
                     (complete_damage_lay, 'complete_damage', 'Complete Damage', 'Blues'),
                     (economic_losses_lay, 'economic_losses', 'Economic Losses', 'Reds'),
                     (fatalities_lay, 'fatalities', 'Fatalities', 'Greens')]:
+                lay_classes = lays_classes[out_filename]
                 out_lay.startEditing()
                 out_lay.selectAll()
 
@@ -887,18 +956,45 @@ class EWMS(QgsService):
                 unique_values = out_real_layer.dataProvider().uniqueValues(fni)
                 num_unique_values = len(unique_values - {NULL})
 
-                renderer = QgsGraduatedSymbolRenderer(
-                    'value', [])
-                # NOTE: the following returns an instance of one of the
-                #       subclasses of QgsClassificationMethod
-                classification_method = \
-                    QgsApplication.classificationMethodRegistry().method(
-                        style_mode)
-                renderer.setClassificationMethod(classification_method)
-                renderer.updateColorRamp(ramp)
-                renderer.updateSymbols(symbol.clone())
-                renderer.updateClasses(
-                    out_real_layer, min(num_unique_values, 7))
+                print('calc2map: pre rule render')
+
+                # add a class for NULL values
+                rule_renderer = QgsRuleBasedRenderer(symbol.clone())
+                root_rule = rule_renderer.rootRule()
+                print('calc2map: len root_rule.children: %d' % len(
+                    root_rule.children()))
+
+                print('calc2map: pre loop lay_classes(%d)' % len(lay_classes))
+                for cla_idx, cla in enumerate(lay_classes):
+                    print('calc2map: loop iter %d' % cla_idx)
+                    # filter = '"value" >= 0.000000 AND "value" <= 0.020361'
+                    if cla.lowerBound() == float('-inf'):
+                        upper = cla.upperBound()
+                        filter = '"value" <= %s' % upper
+                    else:
+                        lower = cla.lowerBound()
+                        upper = cla.upperBound()
+                        filter = '"value" > %s AND "value" <= %s' % (
+                            lower, upper)
+                    cla_rule = rule_renderer.Rule(symbol.clone())
+
+                    # ramp.color(0-1 included float)
+                    color = ramp.color(
+                        float(cla_idx) / float(len(lay_classes) - 1))
+                    cla_rule.setSymbol(QgsFillSymbol.createSimple(
+                    {'color':
+                     '%d,%d,%d' % (color.red(), color.green(), color.blue())}))
+                    cla_rule.setFilterExpression(filter)
+
+                    # not_null_rule = root_rule.children()[0].clone()
+                    # strip parentheses from stringified color HSL
+                    # not_null_rule.setFilterExpression(
+                    # '%s IS NOT NULL' % QgsExpression.quotedColumnRef(style_by))
+                    cla_rule.setLabel(cla.label())
+                    root_rule.appendChild(cla_rule)
+                root_rule.removeChildAt(0)
+                renderer = rule_renderer
+
                 out_real_layer.setRenderer(renderer)
                 out_real_layer.triggerRepaint()
 
@@ -908,6 +1004,8 @@ class EWMS(QgsService):
                 project.addMapLayer(out_real_layer)
 
                 extent = out_real_layer.extent()
+                gem_log('calc2map: extent of %s: %s' % (out_name, extent), Qgis.Critical)
+
                 ref_rect = QgsReferencedRectangle(extent, out_real_layer.crs())
                 vs_project = project.viewSettings()
                 vs_project.setDefaultViewExtent(ref_rect)
