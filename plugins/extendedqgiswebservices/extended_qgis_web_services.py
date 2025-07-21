@@ -35,7 +35,7 @@ from qgis.core import (
     QgsReferencedRectangle, QgsSymbol, QgsGradientColorRamp,
     QgsGraduatedSymbolRenderer, QgsRuleBasedRenderer, QgsCoordinateTransform,
     QgsApplication, QgsStyle, QgsFillSymbol, NULL,
-    QgsWkbTypes, QgsLogger, QgsClassificationJenks, QgsClassificationRange
+    QgsWkbTypes, QgsClassificationJenks, QgsClassificationRange,
 )
 
 
@@ -668,7 +668,6 @@ class EWMS(QgsService):
         gem_log('calc2map: lock acquired %s' % lock_filename,
                 Qgis.Info)
 
-
         # this 'try...finally' is to be able to unlock the locked file at the end of
         # project creation procedure and remove temporary csv file
         try:
@@ -951,22 +950,20 @@ class EWMS(QgsService):
 
                 # ramp.invert() (to switch colors)
 
-                # get unique values
-                fni = out_real_layer.fields().indexOf('value')
-                unique_values = out_real_layer.dataProvider().uniqueValues(fni)
-                num_unique_values = len(unique_values - {NULL})
-
-                print('calc2map: pre rule render')
+                # NOTE: get unique values not managed currently, check later
+                # fni = out_real_layer.fields().indexOf('value')
+                # unique_values = out_real_layer.dataProvider().uniqueValues(fni)
+                # num_unique_values = len(unique_values - {NULL})
 
                 # add a class for NULL values
                 rule_renderer = QgsRuleBasedRenderer(symbol.clone())
                 root_rule = rule_renderer.rootRule()
-                print('calc2map: len root_rule.children: %d' % len(
-                    root_rule.children()))
+                gem_log('calc2map: len root_rule.children: %d' % len(
+                    root_rule.children()), Qgis.Critical)
 
-                print('calc2map: pre loop lay_classes(%d)' % len(lay_classes))
+                gem_log('calc2map: pre loop lay_classes(%d)' % len(lay_classes),
+                        Qgis.Critical)
                 for cla_idx, cla in enumerate(lay_classes):
-                    print('calc2map: loop iter %d' % cla_idx)
                     # filter = '"value" >= 0.000000 AND "value" <= 0.020361'
                     if cla.lowerBound() == float('-inf'):
                         upper = cla.upperBound()
@@ -996,11 +993,6 @@ class EWMS(QgsService):
                 renderer = rule_renderer
 
                 out_real_layer.setRenderer(renderer)
-                out_real_layer.triggerRepaint()
-
-                # _style_curves(out_real_layer, out_name)
-
-                    # add gpkg layer to current QGIS project
                 project.addMapLayer(out_real_layer)
 
                 extent = out_real_layer.extent()
@@ -1036,6 +1028,13 @@ class EWMS(QgsService):
 
             canvas.refresh()
 
+            #
+            #  HOWTO: set project custom vars:
+            #
+            # custom_vars = project.customVariables()
+            # custom_vars['pippo'] = 'pluto'
+            # custom_vars['topolino'] = 'minnie'
+            # project.setCustomVariables(custom_vars)
 
             #
             #  save qgis project
