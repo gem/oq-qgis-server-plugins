@@ -18,6 +18,7 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import io
+import re
 import os
 import csv
 import math
@@ -72,6 +73,23 @@ DEFAULT_SETTINGS = dict(
     developer_mode=False,
     log_level='C',
 )
+
+#
+# NOTE: _get_material and _get_occupancy will be added as part of
+#       the oq-gem-taxonomy python library in the new query swiss-knife function
+#
+def _get_material(taxonomy):
+    mat = re.findall('^[A-Z0-9]+', taxonomy)
+    if len(mat) < 1:
+        return 'UNK'
+    return mat[0]
+
+def _get_occupancy(taxonomy):
+    occ = re.findall('[^A-Z0-9]?(RES|COM|MIX|IND|AGR|GOV|EDU'
+                     '|HEA|TRT|OCO)[^A-Z[0-9]?', taxonomy)
+    if len(occ) < 1:
+        return 'UNK'
+    return occ[0]
 
 def _create_layer_from_selected(source_layer, with_attributes=False):
     """Create a new layer containing only selected features"""
@@ -628,7 +646,7 @@ class EWMS(QgsService):
         gem_log('calc2map_scenario_damage:BEGIN', Qgis.Info)
         calc_id = request.parameter('CALC_ID')
         description = request.parameter('DESCRIPTION')
-
+        adm_level = request.parameter('ADM_LEVEL')
         session = Session()
 
         oqparam_req = '%s/v1/calc/%d/results' % (
@@ -676,7 +694,7 @@ class EWMS(QgsService):
             # skip info header
             next(fp_in)
             csv_in = csv.DictReader(fp_in)
-            fieldnames = ['lon', 'lat', 'MACRO_TAXONOMY', 'structural-complete',
+            fieldnames = ['lon', 'lat', 'taxonomy', 'structural-complete',
                           'structural-losses', 'structural-fatalities']
             csv_out = csv.DictWriter(fp_out, fieldnames)
             csv_out.writeheader()
@@ -730,8 +748,9 @@ class EWMS(QgsService):
             processing.Processing.initialize()
 
             # INFO: here to change adm level if required
-            zonal_uri = ('/io/uploads/subdivision_areas/italy_adm2.gpkg')
-            zonal_layer = QgsVectorLayer(zonal_uri, 'italy_adm2', 'ogr')
+            # NAME_0 nation, NAME_1 region
+            zonal_uri = ('/io/uploads/subdivision_areas/italy_adm%s.gpkg' % adm_level)
+            zonal_layer = QgsVectorLayer(zonal_uri, 'italy_adm%s' % adm_level, 'ogr')
 
             # create destination layer making a copy of regions layer and adding a
             # couple of fields
@@ -739,25 +758,45 @@ class EWMS(QgsService):
                 'Polygon?crs=epsg:4326', 'Complete Damage', 'memory')
             complete_damage_dp = complete_damage_lay.dataProvider()
             complete_damage_lay.startEditing()
+
+            economic_losses_lay = QgsVectorLayer(
+                'Polygon?crs=epsg:4326', 'Economic Losses', 'memory')
+            economic_losses_dp = economic_losses_lay.dataProvider()
+            economic_losses_lay.startEditing()
+
+            fatalities_lay = QgsVectorLayer(
+                'Polygon?crs=epsg:4326', 'Fatalities', 'memory')
+            fatalities_dp = fatalities_lay.dataProvider()
+            fatalities_lay.startEditing()
+
+            # Adm 0 not included ID_0 = 'ITA', NAME_0 = 'Italy'
+            for depth in range(1, int(adm_level) + 1):
+                complete_damage_lay.addAttribute(QgsField(
+                    'ID_%d' % depth, QVariant.Int))
+                complete_damage_lay.addAttribute(QgsField(
+                    'NAME_%d' % depth, QVariant.String))
+
+                economic_losses_lay.addAttribute(QgsField(
+                    'ID_%d' % depth, QVariant.Int))
+                economic_losses_lay.addAttribute(QgsField(
+                    'NAME_%d' % depth, QVariant.String))
+
+                fatalities_lay.addAttribute(QgsField(
+                    'ID_%d' % depth, QVariant.Int))
+                fatalities_lay.addAttribute(QgsField(
+                    'NAME_%d' % depth, QVariant.String))
+
             complete_damage_lay.addAttribute(QgsField('value', QVariant.Double))
             complete_damage_lay.addAttribute(QgsField('json_info', QVariant.String))
             complete_damage_lay.commitChanges()
 
-            economic_losses_lay = QgsVectorLayer(
-                'Polygon?crs=epsg:4326', 'Economic Losses', 'memory')
-            economic_losses_lay.startEditing()
             economic_losses_lay.addAttribute(QgsField('value', QVariant.Double))
             economic_losses_lay.addAttribute(QgsField('json_info', QVariant.String))
             economic_losses_lay.commitChanges()
-            economic_losses_dp = economic_losses_lay.dataProvider()
 
-            fatalities_lay = QgsVectorLayer(
-                'Polygon?crs=epsg:4326', 'Fatalities', 'memory')
-            fatalities_lay.startEditing()
             fatalities_lay.addAttribute(QgsField('value', QVariant.Double))
             fatalities_lay.addAttribute(QgsField('json_info', QVariant.String))
             fatalities_lay.commitChanges()
-            fatalities_dp = fatalities_lay.dataProvider()
 
             # sequence to avoid usage of sites multiple times when on regions border
             grouped_sites = set()
@@ -796,41 +835,49 @@ class EWMS(QgsService):
                                 Qgis.Info)
 
                     # loop to populate new entry for metrics here
-                    complete_damage_sum = 0
-                    complete_damage_maggr = {}
-                    economic_losses_sum = 0
-                    economic_losses_maggr = {}
-                    fatalities_sum = 0
-                    fatalities_maggr = {}
+                    complete_damage_sum = 0.0
+                    complete_damage_maggr = { 'material': {}, 'occupancy': {}}
+                    economic_losses_sum = 0.0
+                    economic_losses_maggr = { 'material': {}, 'occupancy': {}}
+                    fatalities_sum =  0
+                    fatalities_maggr = { 'material': {}, 'occupancy': {}}
 
-                    for feat in points_layer.selectedFeatures():
+                    # FIXME: FOR PRODUCTION UNCOMMENT THIS LOOP DEFINITION
+                    # FOR FEAT IN POINTS_LAYER.SELECTEDFEATURES():
+                    # DEVEL START VVV
+                    for feat_idx, feat in enumerate(points_layer.selectedFeatures()):
+                        if feat_idx == 100:
+                            break
+                    # DEVEL STOP  ^^^
                         if feat.id() in grouped_sites:
                             continue
                         else:
                             grouped_sites.add(feat.id())
-                        # print([x for x in feat])
-                        #
-                        #  FIXME: avoid with a set() use the same point more than one time
-                        #
+                        aggregate_by = {'material': _get_material(feat['taxonomy']),
+                                        'occupancy': _get_occupancy(feat['taxonomy'])}
+
                         complete_damage_sum += feat['structural-complete']
-                        macro_tax = feat['MACRO_TAXONOMY']
-                        if macro_tax in complete_damage_maggr:
-                            complete_damage_maggr[macro_tax] += feat['structural-complete']
-                        else:
-                            complete_damage_maggr[macro_tax] = feat['structural-complete']
-
                         economic_losses_sum += feat['structural-losses']
-                        if macro_tax in economic_losses_maggr:
-                            economic_losses_maggr[macro_tax] += feat['structural-losses']
-                        else:
-                            economic_losses_maggr[macro_tax] = feat['structural-losses']
-
-
                         fatalities_sum += feat['structural-fatalities']
-                        if macro_tax in fatalities_maggr:
-                            fatalities_maggr[macro_tax] += feat['structural-fatalities']
-                        else:
-                            fatalities_maggr[macro_tax] = feat['structural-fatalities']
+                        for aggr_key in aggregate_by:
+                            aggr_val = aggregate_by[aggr_key]
+
+                            if aggr_val in complete_damage_maggr[aggr_key]:
+                                complete_damage_maggr[aggr_key][aggr_val] += feat['structural-complete']
+                            else:
+                                complete_damage_maggr[aggr_key][aggr_val] = feat['structural-complete']
+
+
+                            if aggr_val in economic_losses_maggr[aggr_key]:
+                                economic_losses_maggr[aggr_key][aggr_val] += feat['structural-losses']
+                            else:
+                                economic_losses_maggr[aggr_key][aggr_val] = feat['structural-losses']
+
+
+                            if aggr_val in fatalities_maggr[aggr_key]:
+                                fatalities_maggr[aggr_key][aggr_val] += feat['structural-fatalities']
+                            else:
+                                fatalities_maggr[aggr_key][aggr_val] = feat['structural-fatalities']
 
                     # print(f"cdam: {complete_damage_sum}, ecloss: {economic_losses_sum},"
                     #       f" fatal: {fatalities_sum}")
@@ -842,10 +889,15 @@ class EWMS(QgsService):
                         if out_sum == 0.0:
                             continue
                         with edit(out_lay):
-                            fea = QgsFeature(out_lay.fields())
-                            fea.setGeometry(zonal_feat.geometry())
-                            fea.setAttributes([float(out_sum), json.dumps(out_json)])
-                            out_dp.addFeatures([fea])
+                            feat_out = QgsFeature(out_lay.fields())
+                            feat_out.setGeometry(zonal_feat.geometry())
+                            attrs = []
+                            for depth in range(1, int(adm_level) + 1):
+                                attrs += [zonal_feat['ID_%d' % depth],
+                                          zonal_feat['NAME_%d' % depth]]
+                            attrs += [json.dumps(out_sum), json.dumps(out_json)]
+                            feat_out.setAttributes(attrs)
+                            out_dp.addFeatures([feat_out])
                 else:
                     print('N FEATS: ZERO')
                 zonal_layer.removeSelection()
