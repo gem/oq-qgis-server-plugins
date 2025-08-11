@@ -25,6 +25,7 @@ import math
 import numpy
 import json
 import tempfile
+from zipfile import ZipFile
 import bisect
 from requests import Session
 
@@ -38,7 +39,6 @@ from qgis.core import (
     QgsApplication, QgsStyle, QgsFillSymbol, NULL,
     QgsWkbTypes, QgsClassificationJenks, QgsClassificationRange,
 )
-
 
 from qgis.PyQt.QtGui import QColor
 from qgis.PyQt.QtCore import QVariant, QSize, QUrl, QUrlQuery
@@ -54,6 +54,7 @@ from .gem_common import gem_log, rmdir_recursive, alphanum_rndstr
 from .lock import acquire_lock, release_lock
 from .zipdir import zipdir
 
+import xml.etree.ElementTree as ET
 
 if Qgis.QGIS_VERSION_INT < 31000:
     # the following is an enum
@@ -116,9 +117,6 @@ def _create_layer_from_selected(source_layer, with_attributes=False):
     temp_layer.updateExtents()
 
     return temp_layer
-
-
-
 
 def _style_curves(layer, style_by):
     use_sgc_style = False
@@ -219,9 +217,16 @@ class EWMS(QgsService):
             except Exception as exc:
                 response.setStatusCode(500)
                 response.write("An error occurred: %s" % exc)
-        elif request.parameters()['REQUEST'] == 'GetLayerCustomProperties':
+        elif request.parameters()['REQUEST'] == 'GetLayersCustomProperties':
             try:
-                self._get_custom_properties_by_layer(
+                self._get_custom_properties_by_layers(
+                    request, response, project)
+            except Exception as exc:
+                response.setStatusCode(500)
+                response.write("An error occurred: %s" % exc)
+        elif request.parameters()['REQUEST'] == 'GetProjectCustomProperties':
+            try:
+                self._get_custom_properties_by_project(
                     request, response, project)
             except Exception as exc:
                 response.setStatusCode(500)
@@ -256,7 +261,7 @@ class EWMS(QgsService):
         response.write(
             json.dumps(layer_names, indent=4, sort_keys=True))
 
-    def _get_custom_properties_by_layer(self, request, response, project):
+    def _get_custom_properties_by_layers(self, request, response, project):
         if QgsServerProjectUtils.wmsUseLayerIds(project):
             dict_key = 'id'
         else:
@@ -313,6 +318,11 @@ class EWMS(QgsService):
         response.setStatusCode(200)
         response.write(
             json.dumps(custom_props_filtered, indent=4, sort_keys=True))
+
+    def _get_custom_properties_by_project(self, request, response, project):
+        response.setStatusCode(200)
+        response.write(
+            json.dumps(project.customVariables(), indent=4, sort_keys=True))
 
     def _get_fields_by_layer(self, request, response, project):
         if QgsServerProjectUtils.wmsUseLayerIds(project):
@@ -636,6 +646,8 @@ class EWMS(QgsService):
             release_lock(lock_filename)
 
     def _oq_engine_calc2map_scenario_damage(self, request, response, project, engine_url):
+        # to speedup devel set it to a small value (100 is a good value)
+        MAX_FEATURES =  os.getenv('GEM_GV_MAX_FEATURES', -1)
 
         # number of classified classes
         CLASSIFIED_CLASSES = 7
@@ -656,15 +668,86 @@ class EWMS(QgsService):
             oqparam_req, timeout=100, verify=False, allow_redirects=False)
 
         gem_log('calc2map: post oq-param', Qgis.Info)
-        calc = [x for x in json.load(io.BytesIO(resp.content)) if x['type'] == 'damages-stats']
-        if len(calc) != 1:
+        damages_stats_entries = [x for x in json.load(io.BytesIO(resp.content)) if
+                              x['type'] == 'damages-stats']
+        if len(damages_stats_entries) != 1:
             response.setStatusCode(500)
             response.write("calc2map: 'damages-stats' output not found")
             return
 
         # retrieve damages-stats output
-        resp = session.get("%s" % calc[0]['url'],
-                           timeout=600, verify=False, allow_redirects=False)
+        damages_stats = session.get("%s" % damages_stats_entries[0]['url'],
+                                    timeout=600, verify=False, allow_redirects=False)
+
+        # extract and populate exposure dictionary
+        exposure_entries = [x for x in json.load(io.BytesIO(resp.content))
+                            if x['type'] == 'exposure']
+        if len(exposure_entries) != 1:
+            response.setStatusCode(500)
+            response.write("calc2map: 'exposure' output not found")
+            return
+
+        # retrieve damages-stats output
+        exposure = session.get("%s" % exposure_entries[0]['url'],
+                               timeout=600, verify=False, allow_redirects=False)
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            arch_filename = os.path.join(tempdir, 'archive.zip')
+            with open(arch_filename, "wb") as fp_out:
+                fp_out.write(exposure.content)
+            with ZipFile(arch_filename, "r") as zip_archive:
+                zip_archive.extractall(tempdir)
+
+            xml_files = [f for f in os.listdir(tempdir) if f.endswith('.xml')]
+
+            if len(xml_files) != 1:
+                gem_log('calc2map: more than one xml file in exposure [%s]' %
+                        xml_files, Qgis.Critical)
+                response.setStatusCode(500)
+                response.write('calc2map: more than one xml file in exposure [%s]' %
+                               xml_files)
+                return
+
+            tree = ET.parse(os.path.join(tempdir, xml_files[0]))
+            ns = {'n': 'http://openquake.org/xmlns/nrml/0.5'}
+            assets_tags = tree.findall("./n:exposureModel/n:assets", namespaces=ns)
+            if len(assets_tags) != 1:
+                gem_log('calc2map: multiple assets tags not supported [%s]' %
+                        assets_tags, Qgis.Critical)
+                response.setStatusCode(500)
+                response.write('calc2map: multiple assets tags not supported [%s]' %
+                               assets_tags)
+                return
+
+            csv_filenames = [x.strip() for x in assets_tags[0].text.split('\n')
+                             if x.strip() != '']
+
+            if len(csv_filenames) != 1:
+                gem_log('calc2map: multiple assets elements not supported [%s]' %
+                        csv_filenames, Qgis.Critical)
+                response.setStatusCode(500)
+                response.write(
+                    'calc2map: multiple assets elements not supported [%s]' %
+                    csv_filenames)
+                return
+
+            exposure_dict = {}
+            with open(os.path.join(tempdir, csv_filenames[0]), 'r') as exposure_csv_fp:
+                exposure_csv = csv.DictReader(exposure_csv_fp)
+                for exposure_row in exposure_csv:
+                    exposure_dict[exposure_row['id']] = {
+                        'id': exposure_row['id'],
+                        'lon': exposure_row['lon'],
+                        'lat': exposure_row['lat'],
+                        'value': sum([float(exposure_row['value-' + idx]) for idx in [
+                            'structural', 'nonstructural', 'contents']])
+                        }
+
+            # HERE EXPOSURE DICT loaded correctly
+
+            arch_filename = os.path.join(tempdir, 'archive.zip')
+            with open(arch_filename, "wb") as fp_out:
+                fp_out.write(exposure.content)
 
         # Clean current project
         project.clear()
@@ -690,7 +773,7 @@ class EWMS(QgsService):
         # project creation procedure and remove temporary csv file
         try:
             fp_out = tempfile.NamedTemporaryFile(mode="w", delete=False)
-            fp_in = io.StringIO(resp.text)
+            fp_in = io.StringIO(damages_stats.text)
             # skip info header
             next(fp_in)
             csv_in = csv.DictReader(fp_in)
@@ -752,6 +835,18 @@ class EWMS(QgsService):
             zonal_uri = ('/io/uploads/subdivision_areas/italy_adm%s.gpkg' % adm_level)
             zonal_layer = QgsVectorLayer(zonal_uri, 'italy_adm%s' % adm_level, 'ogr')
 
+            # data structure for info about entire project
+            quantity_keys = ['complete_damage', 'economic_losses', 'fatalities']
+
+            proj_info = {}
+
+            for quantity_key in quantity_keys:
+                proj_info[quantity_key] = {'rank': []}
+                for aggr_key in ['material', 'occupancy']:
+                    proj_info[quantity_key][aggr_key] = {
+                        'tot': {}
+                    }
+
             # create destination layer making a copy of regions layer and adding a
             # couple of fields
             complete_damage_lay = QgsVectorLayer(
@@ -768,6 +863,14 @@ class EWMS(QgsService):
                 'Polygon?crs=epsg:4326', 'Fatalities', 'memory')
             fatalities_dp = fatalities_lay.dataProvider()
             fatalities_lay.startEditing()
+
+            layer_descriptions = [
+                (complete_damage_lay,
+                 'complete_damage', 'Buildings beyond repair', 'Blues'),
+                (economic_losses_lay,
+                 'economic_losses', 'Economic Losses (USD)', 'Reds'),
+                (fatalities_lay,
+                 'fatalities', 'Fatalities', 'Greens')]
 
             # Adm 0 not included ID_0 = 'ITA', NAME_0 = 'Italy'
             for depth in range(1, int(adm_level) + 1):
@@ -842,13 +945,10 @@ class EWMS(QgsService):
                     fatalities_sum =  0
                     fatalities_maggr = { 'material': {}, 'occupancy': {}}
 
-                    # FIXME: FOR PRODUCTION UNCOMMENT THIS LOOP DEFINITION
-                    # FOR FEAT IN POINTS_LAYER.SELECTEDFEATURES():
-                    # DEVEL START VVV
                     for feat_idx, feat in enumerate(points_layer.selectedFeatures()):
-                        if feat_idx == 100:
+                        if MAX_FEATURES != -1 and feat_idx == MAX_FEATURES:
                             break
-                    # DEVEL STOP  ^^^
+
                         if feat.id() in grouped_sites:
                             continue
                         else:
@@ -859,25 +959,50 @@ class EWMS(QgsService):
                         complete_damage_sum += feat['structural-complete']
                         economic_losses_sum += feat['structural-losses']
                         fatalities_sum += feat['structural-fatalities']
-                        for aggr_key in aggregate_by:
-                            aggr_val = aggregate_by[aggr_key]
-
-                            if aggr_val in complete_damage_maggr[aggr_key]:
-                                complete_damage_maggr[aggr_key][aggr_val] += feat['structural-complete']
+                        for aggr_key, item_key in aggregate_by.items():
+                            if item_key in complete_damage_maggr[aggr_key]:
+                                complete_damage_maggr[aggr_key][item_key] += feat['structural-complete']
                             else:
-                                complete_damage_maggr[aggr_key][aggr_val] = feat['structural-complete']
+                                complete_damage_maggr[aggr_key][item_key] = feat['structural-complete']
 
 
-                            if aggr_val in economic_losses_maggr[aggr_key]:
-                                economic_losses_maggr[aggr_key][aggr_val] += feat['structural-losses']
+                            if item_key in economic_losses_maggr[aggr_key]:
+                                economic_losses_maggr[aggr_key][item_key] += feat['structural-losses']
                             else:
-                                economic_losses_maggr[aggr_key][aggr_val] = feat['structural-losses']
+                                economic_losses_maggr[aggr_key][item_key] = feat['structural-losses']
 
 
-                            if aggr_val in fatalities_maggr[aggr_key]:
-                                fatalities_maggr[aggr_key][aggr_val] += feat['structural-fatalities']
+                            if item_key in fatalities_maggr[aggr_key]:
+                                fatalities_maggr[aggr_key][item_key] += feat['structural-fatalities']
                             else:
-                                fatalities_maggr[aggr_key][aggr_val] = feat['structural-fatalities']
+                                fatalities_maggr[aggr_key][item_key] = feat['structural-fatalities']
+
+                    for quantity_key in quantity_keys:
+                        quantity_maggr = vars()[quantity_key + '_maggr']
+                        is_first = True
+                        super_tot = 0
+                        for aggr_key in quantity_maggr:
+                            for item_key, item_val in quantity_maggr[aggr_key].items():
+                                if item_key not in proj_info[quantity_key][aggr_key]['tot']:
+                                    proj_info[quantity_key][aggr_key]['tot'][item_key] = item_val
+                                else:
+                                    proj_info[quantity_key][aggr_key]['tot'][item_key] += item_val
+                                if is_first:
+                                    super_tot += item_val
+                            is_first = False
+
+                        rank_names = []
+                        for depth in range(1, int(adm_level) + 1):
+                            rank_names.append(zonal_feat['NAME_%d' % depth])
+
+                        proj_info[quantity_key]['rank'].append({'id':zonal_feat.id(),
+                                                                'names': rank_names, 'value': super_tot})
+
+                        # sort ranked zones
+                        new_rank = sorted(proj_info[quantity_key]['rank'], key=lambda d: d['value'], reverse=True)
+                        proj_info[quantity_key]['rank'] = new_rank
+                        # riduce rank to 10 elements
+                        proj_info[quantity_key]['rank'] = proj_info[quantity_key]['rank'][:10]
 
                     # print(f"cdam: {complete_damage_sum}, ecloss: {economic_losses_sum},"
                     #       f" fatal: {fatalities_sum}")
@@ -907,10 +1032,7 @@ class EWMS(QgsService):
             #
             lays_values = {}
             lays_classes = {}
-            for out_lay, out_filename, out_name, out_ramp in [
-                    (complete_damage_lay, 'complete_damage', 'Complete Damage', 'Blues'),
-                    (economic_losses_lay, 'economic_losses', 'Economic Losses', 'Reds'),
-                    (fatalities_lay, 'fatalities', 'Fatalities', 'Greens')]:
+            for out_lay, out_filename, out_name, out_ramp in layer_descriptions:
                 lays_values[out_filename] = []
                 out_lay.selectAll()
                 lay_values = lays_values[out_filename]
@@ -968,16 +1090,12 @@ class EWMS(QgsService):
             default_qgs_style = QgsStyle().defaultStyle()
             default_color_ramp_names = default_qgs_style.colorRampNames()
             real_lays = []
-            for out_lay, out_filename, out_name, out_ramp in [
-                    (complete_damage_lay, 'complete_damage', 'Complete Damage', 'Blues'),
-                    (economic_losses_lay, 'economic_losses', 'Economic Losses', 'Reds'),
-                    (fatalities_lay, 'fatalities', 'Fatalities', 'Greens')]:
+            for out_lay, out_filename, out_name, out_ramp in layer_descriptions:
                 lay_classes = lays_classes[out_filename]
                 out_lay.startEditing()
                 out_lay.selectAll()
 
                 out_lay.updateExtents()
-
                 gpkg_filepath = '%s/%s_%s.gpkg' % (
                     layer_folder, out_filename, rnd_sfx)
 
@@ -1045,6 +1163,7 @@ class EWMS(QgsService):
                 renderer = rule_renderer
 
                 out_real_layer.setRenderer(renderer)
+                out_real_layer.setId(out_filename)
                 project.addMapLayer(out_real_layer)
 
                 extent = out_real_layer.extent()
@@ -1083,10 +1202,9 @@ class EWMS(QgsService):
             #
             #  HOWTO: set project custom vars:
             #
-            # custom_vars = project.customVariables()
-            # custom_vars['pippo'] = 'pluto'
-            # custom_vars['topolino'] = 'minnie'
-            # project.setCustomVariables(custom_vars)
+            custom_vars = project.customVariables()
+            custom_vars['project_info'] = json.dumps(proj_info)
+            project.setCustomVariables(custom_vars)
 
             #
             #  save qgis project
