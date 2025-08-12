@@ -646,6 +646,36 @@ class EWMS(QgsService):
             release_lock(lock_filename)
 
     def _oq_engine_calc2map_scenario_damage(self, request, response, project, engine_url):
+        qta_init = {
+            'lay': None,
+            'dp': None,
+            'descr': None,
+            'ramp_col': None,
+            'tot': None,
+            'div': None,
+            'maggr': None,
+            }
+
+        quantities = {}
+
+        quantities['complete_damage'] = qta_init.copy()
+        quantities['complete_damage']['descr'] = 'Buildings beyond repair'
+        quantities['complete_damage']['ramp_col'] = 'Blues'
+        quantities['complete_damage']['field'] = 'structural-complete'
+        quantities['complete_damage']['rel_fields'] = ['value-number']
+
+        quantities['economic_losses'] = qta_init.copy()
+        quantities['economic_losses']['descr'] = 'Economic Losses (USD)'
+        quantities['economic_losses']['ramp_col'] =  'Reds'
+        quantities['economic_losses']['field'] = 'structural-losses'
+        quantities['economic_losses']['rel_fields'] = ['value-structural','value-nonstructural','value-contents']
+
+        quantities['fatalities'] = qta_init.copy()
+        quantities['fatalities']['descr'] = 'Fatalities'
+        quantities['fatalities']['ramp_col'] = 'Greens'
+        quantities['fatalities']['field'] = 'structural-fatalities'
+        quantities['fatalities']['rel_fields'] = ['value-residents']
+
         # to speedup devel set it to a small value (100 is a good value)
         MAX_FEATURES =  os.getenv('GEM_GV_MAX_FEATURES', -1)
 
@@ -697,13 +727,14 @@ class EWMS(QgsService):
             return
 
         # retrieve damages-stats output
-        exposure = session.get("%s" % exposure_entries[0]['url'],
+        exposure_data = session.get("%s" % exposure_entries[0]['url'],
                                timeout=600, verify=False, allow_redirects=False)
 
+        exposure = {}
         with tempfile.TemporaryDirectory() as tempdir:
             arch_filename = os.path.join(tempdir, 'archive.zip')
             with open(arch_filename, "wb") as fp_out:
-                fp_out.write(exposure.content)
+                fp_out.write(exposure_data.content)
             with ZipFile(arch_filename, "r") as zip_archive:
                 zip_archive.extractall(tempdir)
 
@@ -740,23 +771,20 @@ class EWMS(QgsService):
                     csv_filenames)
                 return
 
-            exposure_dict = {}
             with open(os.path.join(tempdir, csv_filenames[0]), 'r') as exposure_csv_fp:
                 exposure_csv = csv.DictReader(exposure_csv_fp)
                 for exposure_row in exposure_csv:
-                    exposure_dict[exposure_row['id']] = {
+                    exp_id = exposure_row['id']
+                    exposure[exp_id] = {
                         'id': exposure_row['id'],
                         'lon': exposure_row['lon'],
                         'lat': exposure_row['lat'],
-                        'value': sum([float(exposure_row['value-' + idx]) for idx in [
-                            'structural', 'nonstructural', 'contents']])
                         }
-
-            # HERE EXPOSURE DICT loaded correctly
-
-            arch_filename = os.path.join(tempdir, 'archive.zip')
-            with open(arch_filename, "wb") as fp_out:
-                fp_out.write(exposure.content)
+                    for qta_key, qta in quantities.items():
+                        exposure[exp_id][qta_key] = sum(
+                            [float(exposure_row[rel_field]) for
+                             rel_field in qta['rel_fields']
+                             ])
 
         # Clean current project
         project.clear()
@@ -786,8 +814,11 @@ class EWMS(QgsService):
             # skip info header
             next(fp_in)
             csv_in = csv.DictReader(fp_in)
-            fieldnames = ['lon', 'lat', 'taxonomy', 'structural-complete',
-                          'structural-losses', 'structural-fatalities']
+            fieldnames = ['asset_id', 'lon', 'lat', 'taxonomy']
+
+            for qta_key, qta in quantities.items():
+                fieldnames += [qta['field']]
+
             csv_out = csv.DictWriter(fp_out, fieldnames)
             csv_out.writeheader()
             for row_in in csv_in:
@@ -844,36 +875,11 @@ class EWMS(QgsService):
             zonal_uri = ('/io/uploads/subdivision_areas/italy_adm%s.gpkg' % adm_level)
             zonal_layer = QgsVectorLayer(zonal_uri, 'italy_adm%s' % adm_level, 'ogr')
 
-            qta_init = {
-                'lay': None,
-                'dp': None,
-                'descr': None,
-                'ramp_col': None,
-                'sum': None,
-                'maggr': None
-                }
-
-            quantities = {}
-
-            quantities['complete_damage'] = qta_init.copy()
-            quantities['complete_damage']['descr'] = 'Buildings beyond repair'
-            quantities['complete_damage']['ramp_col'] = 'Blues'
-            quantities['complete_damage']['field'] = 'structural-complete'
-
-            quantities['economic_losses'] = qta_init.copy()
-            quantities['economic_losses']['descr'] = 'Economic Losses (USD)'
-            quantities['economic_losses']['ramp_col'] =  'Reds'
-            quantities['economic_losses']['field'] = 'structural-losses'
-
-            quantities['fatalities'] = qta_init.copy()
-            quantities['fatalities']['descr'] = 'Fatalities'
-            quantities['fatalities']['ramp_col'] = 'Greens'
-            quantities['fatalities']['field'] = 'structural-fatalities'
 
             proj_info = {}
 
             for qta_key, qta in quantities.items():
-                proj_info[qta_key] = {'rank': [],
+                proj_info[qta_key] = {'rank_abs': [],
                                       'rank_rel': []}
                 for aggr_key in aggrs_by:
                     proj_info[qta_key][aggr_key] = {
@@ -934,7 +940,8 @@ class EWMS(QgsService):
                                 Qgis.Info)
 
                     for qta_key, qta in quantities.items():
-                        qta['sum'] = 0.0
+                        qta['tot'] = 0.0
+                        qta['div'] = 0.0
                         qta['maggr'] = {}
                         for aggr_key in aggrs_by:
                             qta['maggr'][aggr_key] = {}
@@ -948,12 +955,17 @@ class EWMS(QgsService):
                         else:
                             grouped_sites.add(feat.id())
 
+                            # gem_log('calc2map: feat.id type: %s' % type(feat.id()), Qgis.Critical)
+
+                        feat_exposure = exposure[feat['asset_id']]
+
                         aggregate_by = {}
                         for aggr_key, aggr in aggrs_by.items():
                             aggregate_by[aggr_key] = aggr['get'](feat['taxonomy'])
 
                         for qta_key, qta in quantities.items():
-                            qta['sum']  += feat[qta['field']]
+                            qta['tot'] += feat[qta['field']]
+                            qta['div'] += feat_exposure[qta_key]
 
                         for aggr_key, item_key in aggregate_by.items():
                             for qta_key, qta in quantities.items():
@@ -964,28 +976,23 @@ class EWMS(QgsService):
 
                     for qta_key, qta in quantities.items():
                         quantity_maggr = qta['maggr']
-                        is_first = True
-                        super_tot = 0
                         for aggr_key in quantity_maggr:
                             for item_key, item_val in quantity_maggr[aggr_key].items():
                                 if item_key not in proj_info[qta_key][aggr_key]['tot']:
                                     proj_info[qta_key][aggr_key]['tot'][item_key] = item_val
                                 else:
                                     proj_info[qta_key][aggr_key]['tot'][item_key] += item_val
-                                if is_first:
-                                    super_tot += item_val
-                            is_first = False
 
                         rank_names = []
                         for depth in range(1, int(adm_level) + 1):
                             rank_names.append(zonal_feat['NAME_%d' % depth])
 
-                        proj_info[qta_key]['rank'].append({'id':zonal_feat.id(),
-                                                               'names': rank_names, 'value': super_tot})
+                        proj_info[qta_key]['rank_abs'].append({'id':zonal_feat.id(),
+                                                               'names': rank_names, 'value': qta['tot']})
                         proj_info[qta_key]['rank_rel'].append({'id':zonal_feat.id(),
-                                                               'names': rank_names, 'value': super_tot})
+                                                               'names': rank_names, 'value': qta['tot'] / qta['div']})
 
-                        for rank_key in ['rank', 'rank_rel']:
+                        for rank_key in ['rank_abs', 'rank_rel']:
                             # sort ranked zones
                             new_rank = sorted(proj_info[qta_key][rank_key], key=lambda d: d['value'], reverse=True)
                             proj_info[qta_key][rank_key] = new_rank
@@ -996,7 +1003,7 @@ class EWMS(QgsService):
                     #       f" fatal: {fatalities_sum}")
 
                     for qta_key, qta in quantities.items():
-                        if qta['sum'] == 0.0:
+                        if qta['tot'] == 0.0:
                             continue
                         with edit(qta['lay']):
                             feat_out = QgsFeature(qta['lay'].fields())
@@ -1005,7 +1012,7 @@ class EWMS(QgsService):
                             for depth in range(1, int(adm_level) + 1):
                                 attrs += [zonal_feat['ID_%d' % depth],
                                           zonal_feat['NAME_%d' % depth]]
-                            attrs += [json.dumps(qta['sum']), json.dumps(qta['maggr'])]
+                            attrs += [json.dumps(qta['tot']), json.dumps(qta['maggr'])]
                             feat_out.setAttributes(attrs)
                             qta['dp'].addFeatures([feat_out])
                 else:
@@ -1222,6 +1229,11 @@ class EWMS(QgsService):
                             'uploaded_file': os.path.basename(
                                 archive_pathname)},
                            indent=4, sort_keys=True))
+
+        except Exception as e:
+            gem_log('calc2map: general exception occurred: %s' % e,
+                    Qgis.Critical)
+            raise e
 
         finally:
             if os.path.exists(fp_out.name):
