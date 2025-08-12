@@ -652,6 +652,15 @@ class EWMS(QgsService):
         # number of classified classes
         CLASSIFIED_CLASSES = 7
 
+        aggrs_by = {
+            'material': {
+                'get': _get_material
+            },
+            'occupancy': {
+                'get': _get_occupancy
+            }
+        }
+
         # Get the project instance
         project = QgsProject.instance()
 
@@ -835,71 +844,58 @@ class EWMS(QgsService):
             zonal_uri = ('/io/uploads/subdivision_areas/italy_adm%s.gpkg' % adm_level)
             zonal_layer = QgsVectorLayer(zonal_uri, 'italy_adm%s' % adm_level, 'ogr')
 
-            # data structure for info about entire project
-            quantity_keys = ['complete_damage', 'economic_losses', 'fatalities']
+            qta_init = {
+                'lay': None,
+                'dp': None,
+                'descr': None,
+                'ramp_col': None,
+                'sum': None,
+                'maggr': None
+                }
+
+            quantities = {}
+
+            quantities['complete_damage'] = qta_init.copy()
+            quantities['complete_damage']['descr'] = 'Buildings beyond repair'
+            quantities['complete_damage']['ramp_col'] = 'Blues'
+            quantities['complete_damage']['field'] = 'structural-complete'
+
+            quantities['economic_losses'] = qta_init.copy()
+            quantities['economic_losses']['descr'] = 'Economic Losses (USD)'
+            quantities['economic_losses']['ramp_col'] =  'Reds'
+            quantities['economic_losses']['field'] = 'structural-losses'
+
+            quantities['fatalities'] = qta_init.copy()
+            quantities['fatalities']['descr'] = 'Fatalities'
+            quantities['fatalities']['ramp_col'] = 'Greens'
+            quantities['fatalities']['field'] = 'structural-fatalities'
 
             proj_info = {}
 
-            for quantity_key in quantity_keys:
-                proj_info[quantity_key] = {'rank': []}
-                for aggr_key in ['material', 'occupancy']:
-                    proj_info[quantity_key][aggr_key] = {
+            for qta_key, qta in quantities.items():
+                proj_info[qta_key] = {'rank': [],
+                                      'rank_rel': []}
+                for aggr_key in aggrs_by:
+                    proj_info[qta_key][aggr_key] = {
                         'tot': {}
                     }
 
-            # create destination layer making a copy of regions layer and adding a
-            # couple of fields
-            complete_damage_lay = QgsVectorLayer(
-                'Polygon?crs=epsg:4326', 'Complete Damage', 'memory')
-            complete_damage_dp = complete_damage_lay.dataProvider()
-            complete_damage_lay.startEditing()
+                qta['lay'] = QgsVectorLayer(
+                    'Polygon?crs=epsg:4326', qta['descr'], 'memory')
 
-            economic_losses_lay = QgsVectorLayer(
-                'Polygon?crs=epsg:4326', 'Economic Losses', 'memory')
-            economic_losses_dp = economic_losses_lay.dataProvider()
-            economic_losses_lay.startEditing()
+                qta['dp'] = qta['lay'].dataProvider()
+                qta['lay'].startEditing()
 
-            fatalities_lay = QgsVectorLayer(
-                'Polygon?crs=epsg:4326', 'Fatalities', 'memory')
-            fatalities_dp = fatalities_lay.dataProvider()
-            fatalities_lay.startEditing()
+                # Adm 0 not included ID_0 = 'ITA', NAME_0 = 'Italy'
+                for depth in range(1, int(adm_level) + 1):
+                    qta['lay'].addAttribute(QgsField(
+                        'ID_%d' % depth, QVariant.Int))
+                    qta['lay'].addAttribute(QgsField(
+                        'NAME_%d' % depth, QVariant.String))
 
-            layer_descriptions = [
-                (complete_damage_lay,
-                 'complete_damage', 'Buildings beyond repair', 'Blues'),
-                (economic_losses_lay,
-                 'economic_losses', 'Economic Losses (USD)', 'Reds'),
-                (fatalities_lay,
-                 'fatalities', 'Fatalities', 'Greens')]
-
-            # Adm 0 not included ID_0 = 'ITA', NAME_0 = 'Italy'
-            for depth in range(1, int(adm_level) + 1):
-                complete_damage_lay.addAttribute(QgsField(
-                    'ID_%d' % depth, QVariant.Int))
-                complete_damage_lay.addAttribute(QgsField(
-                    'NAME_%d' % depth, QVariant.String))
-
-                economic_losses_lay.addAttribute(QgsField(
-                    'ID_%d' % depth, QVariant.Int))
-                economic_losses_lay.addAttribute(QgsField(
-                    'NAME_%d' % depth, QVariant.String))
-
-                fatalities_lay.addAttribute(QgsField(
-                    'ID_%d' % depth, QVariant.Int))
-                fatalities_lay.addAttribute(QgsField(
-                    'NAME_%d' % depth, QVariant.String))
-
-            complete_damage_lay.addAttribute(QgsField('value', QVariant.Double))
-            complete_damage_lay.addAttribute(QgsField('json_info', QVariant.String))
-            complete_damage_lay.commitChanges()
-
-            economic_losses_lay.addAttribute(QgsField('value', QVariant.Double))
-            economic_losses_lay.addAttribute(QgsField('json_info', QVariant.String))
-            economic_losses_lay.commitChanges()
-
-            fatalities_lay.addAttribute(QgsField('value', QVariant.Double))
-            fatalities_lay.addAttribute(QgsField('json_info', QVariant.String))
-            fatalities_lay.commitChanges()
+                qta['lay'].addAttribute(QgsField('value', QVariant.Double))
+                qta['lay'].addAttribute(QgsField('json_info', QVariant.String))
+                qta['lay'].commitChanges()
 
             # sequence to avoid usage of sites multiple times when on regions border
             grouped_sites = set()
@@ -937,13 +933,11 @@ class EWMS(QgsService):
                             points_layer.selectedFeatureIds()),
                                 Qgis.Info)
 
-                    # loop to populate new entry for metrics here
-                    complete_damage_sum = 0.0
-                    complete_damage_maggr = { 'material': {}, 'occupancy': {}}
-                    economic_losses_sum = 0.0
-                    economic_losses_maggr = { 'material': {}, 'occupancy': {}}
-                    fatalities_sum =  0
-                    fatalities_maggr = { 'material': {}, 'occupancy': {}}
+                    for qta_key, qta in quantities.items():
+                        qta['sum'] = 0.0
+                        qta['maggr'] = {}
+                        for aggr_key in aggrs_by:
+                            qta['maggr'][aggr_key] = {}
 
                     for feat_idx, feat in enumerate(points_layer.selectedFeatures()):
                         if MAX_FEATURES != -1 and feat_idx == MAX_FEATURES:
@@ -953,40 +947,31 @@ class EWMS(QgsService):
                             continue
                         else:
                             grouped_sites.add(feat.id())
-                        aggregate_by = {'material': _get_material(feat['taxonomy']),
-                                        'occupancy': _get_occupancy(feat['taxonomy'])}
 
-                        complete_damage_sum += feat['structural-complete']
-                        economic_losses_sum += feat['structural-losses']
-                        fatalities_sum += feat['structural-fatalities']
+                        aggregate_by = {}
+                        for aggr_key, aggr in aggrs_by.items():
+                            aggregate_by[aggr_key] = aggr['get'](feat['taxonomy'])
+
+                        for qta_key, qta in quantities.items():
+                            qta['sum']  += feat[qta['field']]
+
                         for aggr_key, item_key in aggregate_by.items():
-                            if item_key in complete_damage_maggr[aggr_key]:
-                                complete_damage_maggr[aggr_key][item_key] += feat['structural-complete']
-                            else:
-                                complete_damage_maggr[aggr_key][item_key] = feat['structural-complete']
+                            for qta_key, qta in quantities.items():
+                                if item_key in qta['maggr'][aggr_key]:
+                                    qta['maggr'][aggr_key][item_key] += feat[qta['field']]
+                                else:
+                                    qta['maggr'][aggr_key][item_key] = feat[qta['field']]
 
-
-                            if item_key in economic_losses_maggr[aggr_key]:
-                                economic_losses_maggr[aggr_key][item_key] += feat['structural-losses']
-                            else:
-                                economic_losses_maggr[aggr_key][item_key] = feat['structural-losses']
-
-
-                            if item_key in fatalities_maggr[aggr_key]:
-                                fatalities_maggr[aggr_key][item_key] += feat['structural-fatalities']
-                            else:
-                                fatalities_maggr[aggr_key][item_key] = feat['structural-fatalities']
-
-                    for quantity_key in quantity_keys:
-                        quantity_maggr = vars()[quantity_key + '_maggr']
+                    for qta_key, qta in quantities.items():
+                        quantity_maggr = qta['maggr']
                         is_first = True
                         super_tot = 0
                         for aggr_key in quantity_maggr:
                             for item_key, item_val in quantity_maggr[aggr_key].items():
-                                if item_key not in proj_info[quantity_key][aggr_key]['tot']:
-                                    proj_info[quantity_key][aggr_key]['tot'][item_key] = item_val
+                                if item_key not in proj_info[qta_key][aggr_key]['tot']:
+                                    proj_info[qta_key][aggr_key]['tot'][item_key] = item_val
                                 else:
-                                    proj_info[quantity_key][aggr_key]['tot'][item_key] += item_val
+                                    proj_info[qta_key][aggr_key]['tot'][item_key] += item_val
                                 if is_first:
                                     super_tot += item_val
                             is_first = False
@@ -995,34 +980,34 @@ class EWMS(QgsService):
                         for depth in range(1, int(adm_level) + 1):
                             rank_names.append(zonal_feat['NAME_%d' % depth])
 
-                        proj_info[quantity_key]['rank'].append({'id':zonal_feat.id(),
-                                                                'names': rank_names, 'value': super_tot})
+                        proj_info[qta_key]['rank'].append({'id':zonal_feat.id(),
+                                                               'names': rank_names, 'value': super_tot})
+                        proj_info[qta_key]['rank_rel'].append({'id':zonal_feat.id(),
+                                                               'names': rank_names, 'value': super_tot})
 
-                        # sort ranked zones
-                        new_rank = sorted(proj_info[quantity_key]['rank'], key=lambda d: d['value'], reverse=True)
-                        proj_info[quantity_key]['rank'] = new_rank
-                        # riduce rank to 10 elements
-                        proj_info[quantity_key]['rank'] = proj_info[quantity_key]['rank'][:10]
+                        for rank_key in ['rank', 'rank_rel']:
+                            # sort ranked zones
+                            new_rank = sorted(proj_info[qta_key][rank_key], key=lambda d: d['value'], reverse=True)
+                            proj_info[qta_key][rank_key] = new_rank
+                            # riduce rank to 10 elements
+                            proj_info[qta_key][rank_key] = proj_info[qta_key][rank_key][:10]
 
                     # print(f"cdam: {complete_damage_sum}, ecloss: {economic_losses_sum},"
                     #       f" fatal: {fatalities_sum}")
 
-                    for out_lay, out_dp, out_sum, out_json, out_name in [
-                            (complete_damage_lay, complete_damage_dp, complete_damage_sum, complete_damage_maggr, 'complete_damage'),
-                            (economic_losses_lay, economic_losses_dp, economic_losses_sum, economic_losses_maggr, 'economic_losses'),
-                            (fatalities_lay, fatalities_dp, fatalities_sum, fatalities_maggr, 'fatalities')]:
-                        if out_sum == 0.0:
+                    for qta_key, qta in quantities.items():
+                        if qta['sum'] == 0.0:
                             continue
-                        with edit(out_lay):
-                            feat_out = QgsFeature(out_lay.fields())
+                        with edit(qta['lay']):
+                            feat_out = QgsFeature(qta['lay'].fields())
                             feat_out.setGeometry(zonal_feat.geometry())
                             attrs = []
                             for depth in range(1, int(adm_level) + 1):
                                 attrs += [zonal_feat['ID_%d' % depth],
                                           zonal_feat['NAME_%d' % depth]]
-                            attrs += [json.dumps(out_sum), json.dumps(out_json)]
+                            attrs += [json.dumps(qta['sum']), json.dumps(qta['maggr'])]
                             feat_out.setAttributes(attrs)
-                            out_dp.addFeatures([feat_out])
+                            qta['dp'].addFeatures([feat_out])
                 else:
                     print('N FEATS: ZERO')
                 zonal_layer.removeSelection()
@@ -1032,13 +1017,14 @@ class EWMS(QgsService):
             #
             lays_values = {}
             lays_classes = {}
-            for out_lay, out_filename, out_name, out_ramp in layer_descriptions:
-                lays_values[out_filename] = []
-                out_lay.selectAll()
-                lay_values = lays_values[out_filename]
+            for qta_key, qta in quantities.items():
+
+                lays_values[qta_key] = []
+                qta['lay'].selectAll()
+                lay_values = lays_values[qta_key]
                 attr_idx = -1
                 # populate an ordered list of values
-                for feat in out_lay.selectedFeatures():
+                for feat in qta['lay'].selectedFeatures():
                     if attr_idx < 0:
                         attr_idx = feat.fieldNameIndex('value')
                     bisect.insort(lay_values, float(feat.attributes()[attr_idx]))
@@ -1067,7 +1053,7 @@ class EWMS(QgsService):
                      [QgsClassificationRange('<= 1', float('-inf'), 1.0)] + cla)
 
                 # create ceiled (integers as limits) ranges
-                lay_classes = lays_classes[out_filename] = []
+                lay_classes = lays_classes[qta_key] = []
                 for lay_class in lay_classes_float:
                     if lay_class.lowerBound() == float('-inf'):
                         lay_classes.append(lay_class)
@@ -1090,30 +1076,30 @@ class EWMS(QgsService):
             default_qgs_style = QgsStyle().defaultStyle()
             default_color_ramp_names = default_qgs_style.colorRampNames()
             real_lays = []
-            for out_lay, out_filename, out_name, out_ramp in layer_descriptions:
-                lay_classes = lays_classes[out_filename]
-                out_lay.startEditing()
-                out_lay.selectAll()
+            for qta_key, qta in quantities.items():
+                lay_classes = lays_classes[qta_key]
+                qta['lay'].startEditing()
+                qta['lay'].selectAll()
 
-                out_lay.updateExtents()
+                qta['lay'].updateExtents()
                 gpkg_filepath = '%s/%s_%s.gpkg' % (
-                    layer_folder, out_filename, rnd_sfx)
+                    layer_folder, qta_key, rnd_sfx)
 
                 gem_log('calc2map: pre layer save [%s]' % gpkg_filepath,
                         Qgis.Critical)
-                out_lay.commitChanges()
+                qta['lay'].commitChanges()
                 QgsVectorFileWriter.writeAsVectorFormat(
-                    out_lay, gpkg_filepath,
-                    "UTF-8", out_lay.crs(), "GPKG",
+                    qta['lay'], gpkg_filepath,
+                    "UTF-8", qta['lay'].crs(), "GPKG",
                     layerOptions=['OVERWRITE=YES'])
                 print('calc2map: post layer save')
 
-                out_real_layer = QgsVectorLayer(gpkg_filepath, out_name, 'ogr')
+                out_real_layer = QgsVectorLayer(gpkg_filepath, qta['descr'], 'ogr')
                 real_lays.append(out_real_layer)
                 symbol = QgsSymbol.defaultSymbol(out_real_layer.geometryType())
                 symbol.setOpacity(1)
-                ramp_type_idx = default_color_ramp_names.index(out_ramp)
-                symbol.setColor(QColor(RAMP_EXTREME_COLORS[out_ramp]['top']))
+                ramp_type_idx = default_color_ramp_names.index(qta['ramp_col'])
+                symbol.setColor(QColor(RAMP_EXTREME_COLORS[qta['ramp_col']]['top']))
 
                 ramp = default_qgs_style.colorRamp(
                     default_color_ramp_names[ramp_type_idx])
@@ -1163,11 +1149,11 @@ class EWMS(QgsService):
                 renderer = rule_renderer
 
                 out_real_layer.setRenderer(renderer)
-                out_real_layer.setId(out_filename)
+                out_real_layer.setId(qta_key)
                 project.addMapLayer(out_real_layer)
 
                 extent = out_real_layer.extent()
-                gem_log('calc2map: extent of %s: %s' % (out_name, extent), Qgis.Critical)
+                gem_log('calc2map: extent of %s: %s' % (qta['descr'], extent), Qgis.Critical)
 
                 ref_rect = QgsReferencedRectangle(extent, out_real_layer.crs())
                 vs_project = project.viewSettings()
@@ -1191,7 +1177,7 @@ class EWMS(QgsService):
             # extent = ref_rect  # QgsRectangle(-180, -90, 180, 90)
 
             layer_extent = extent
-            source_crs = out_lay.crs()
+            source_crs = qta['lay'].crs()
             dest_crs = project.crs()
             transform = QgsCoordinateTransform(source_crs, dest_crs, project)
             transformed_extent = transform.transformBoundingBox(layer_extent)
