@@ -290,7 +290,7 @@ class EWMS(QgsService):
         for layer_id, layer in project.mapLayers().items():
             # If a shortname is set, we must use it instead of
             # the plain layer name
-            layer_name = layer.shortName() or layer.name()
+            layer_name = layer.serverProperties().shortName() or layer.name()
             if dict_key == 'name':
                 custom_props_key = layer_name
             else:
@@ -343,7 +343,7 @@ class EWMS(QgsService):
                 continue
             # If a shortname is set, we must use it instead of
             # the plain layer name
-            layer_name = layer.shortName() or layer.name()
+            layer_name = layer.serverProperties().shortName() or layer.name()
             if dict_key == 'name':
                 layer_key = layer_name
             else:
@@ -383,7 +383,7 @@ class EWMS(QgsService):
                 continue
             # If a shortname is set, we must use it instead of
             # the plain layer name
-            layer_name = layer.shortName() or layer.name()
+            layer_name = layer.serverProperties().shortName() or layer.name()
             if dict_key == 'name':
                 layer_key = layer_name
             else:
@@ -658,11 +658,11 @@ class EWMS(QgsService):
 
         quantities = {}
 
-        quantities['complete_damage'] = qta_init.copy()
-        quantities['complete_damage']['descr'] = 'Buildings beyond repair'
-        quantities['complete_damage']['ramp_col'] = 'Blues'
-        quantities['complete_damage']['field'] = 'structural-complete'
-        quantities['complete_damage']['rel_fields'] = ['value-number']
+        quantities['fatalities'] = qta_init.copy()
+        quantities['fatalities']['descr'] = 'Fatalities'
+        quantities['fatalities']['ramp_col'] = 'Greens'
+        quantities['fatalities']['field'] = 'structural-fatalities'
+        quantities['fatalities']['rel_fields'] = ['value-residents']
 
         quantities['economic_losses'] = qta_init.copy()
         quantities['economic_losses']['descr'] = 'Economic Losses (USD)'
@@ -670,11 +670,11 @@ class EWMS(QgsService):
         quantities['economic_losses']['field'] = 'structural-losses'
         quantities['economic_losses']['rel_fields'] = ['value-structural','value-nonstructural','value-contents']
 
-        quantities['fatalities'] = qta_init.copy()
-        quantities['fatalities']['descr'] = 'Fatalities'
-        quantities['fatalities']['ramp_col'] = 'Greens'
-        quantities['fatalities']['field'] = 'structural-fatalities'
-        quantities['fatalities']['rel_fields'] = ['value-residents']
+        quantities['complete_damage'] = qta_init.copy()
+        quantities['complete_damage']['descr'] = 'Buildings beyond repair'
+        quantities['complete_damage']['ramp_col'] = 'Blues'
+        quantities['complete_damage']['field'] = 'structural-complete'
+        quantities['complete_damage']['rel_fields'] = ['value-number']
 
         # to speedup devel set it to a small value (100 is a good value)
         MAX_FEATURES =  os.getenv('GEM_GV_MAX_FEATURES', -1)
@@ -1156,7 +1156,7 @@ class EWMS(QgsService):
                 renderer = rule_renderer
 
                 out_real_layer.setRenderer(renderer)
-                out_real_layer.setId(qta_key)
+                out_real_layer.setId(qta_key + '_qgis_id')
                 project.addMapLayer(out_real_layer)
 
                 extent = out_real_layer.extent()
