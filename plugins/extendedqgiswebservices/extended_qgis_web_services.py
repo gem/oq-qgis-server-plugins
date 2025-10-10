@@ -671,7 +671,7 @@ class EWMS(QgsService):
         quantities['economic_losses']['rel_fields'] = ['value-structural','value-nonstructural','value-contents']
 
         quantities['complete_damage'] = qta_init.copy()
-        quantities['complete_damage']['descr'] = 'Buildings beyond repair'
+        quantities['complete_damage']['descr'] = 'Buildings Beyond Repair'
         quantities['complete_damage']['ramp_col'] = 'Blues'
         quantities['complete_damage']['field'] = 'structural-complete'
         quantities['complete_damage']['rel_fields'] = ['value-number']
@@ -703,6 +703,7 @@ class EWMS(QgsService):
         oqparam_req = '%s/v1/calc/%d/results' % (
             engine_url, int(calc_id),)
         gem_log('calc2map: pre oq-param: [%s]' % oqparam_req, Qgis.Info)
+        print('OQDOWNLOAD: Calc_Result: %s' % oqparam_req)
         resp = session.get(
             oqparam_req, timeout=100, verify=False, allow_redirects=False)
 
@@ -715,6 +716,7 @@ class EWMS(QgsService):
             return
 
         # retrieve damages-stats output
+        print('OQDOWNLOAD: Damages_stats: %s' % damages_stats_entries[0]['url'])
         damages_stats = session.get("%s" % damages_stats_entries[0]['url'],
                                     timeout=600, verify=False, allow_redirects=False)
 
@@ -727,12 +729,13 @@ class EWMS(QgsService):
             return
 
         # retrieve damages-stats output
+        print('OQDOWNLOAD: Exposure_data: %s' % exposure_entries[0]['url'])
         exposure_data = session.get("%s" % exposure_entries[0]['url'],
                                timeout=600, verify=False, allow_redirects=False)
 
         exposure = {}
         with tempfile.TemporaryDirectory() as tempdir:
-            arch_filename = os.path.join(tempdir, 'archive.zip')
+            arch_filename = os.path.join(tempdir, 'exposure_data.zip')
             with open(arch_filename, "wb") as fp_out:
                 fp_out.write(exposure_data.content)
             with ZipFile(arch_filename, "r") as zip_archive:
@@ -806,24 +809,89 @@ class EWMS(QgsService):
         gem_log('calc2map: lock acquired %s' % lock_filename,
                 Qgis.Info)
 
-        # this 'try...finally' is to be able to unlock the locked file at the end of
-        # project creation procedure and remove temporary csv file
+        # this 'try...finally' is to be able to unlock the locked file
+        # at the end of project creation procedure and remove temporary csv file
         try:
-            fp_out = tempfile.NamedTemporaryFile(mode="w", delete=False)
-            fp_in = io.StringIO(damages_stats.text)
-            # skip info header
-            next(fp_in)
-            csv_in = csv.DictReader(fp_in)
-            fieldnames = ['asset_id', 'lon', 'lat', 'taxonomy']
+            headers = damages_stats.headers
+            content_type = headers.get('content-type').split(';')[0]
+            if content_type.upper() != 'APPLICATION/X-ZIP':
+                response.setStatusCode(400)
+                response.setHeader('content-type',
+                                   'application/json; charset=utf-8')
+                response.write(
+                    json.dumps({
+                        'status': 'fail',
+                        'reason': (
+                            "for 'damages_stats' a zip file was expected,"
+                            " instead a '%s' is retrieved, quantiles are"
+                            " required as output for this calculation?" %
+                            content_type)
+                    }, indent=4, sort_keys=True))
 
-            for qta_key, qta in quantities.items():
-                fieldnames += [qta['field']]
+                return
 
-            csv_out = csv.DictWriter(fp_out, fieldnames)
-            csv_out.writeheader()
-            for row_in in csv_in:
-                csv_out.writerow({name: row_in[name] for name in fieldnames})
-            fp_out.close()
+            # --- OLD IMPLEMENTATION: BEGIN ---
+            # fp_out = tempfile.NamedTemporaryFile(mode="w", delete=False)
+            # fp_in = io.StringIO(damages_stats.text)
+            # # skip info header
+            # next(fp_in)
+            # csv_in = csv.DictReader(fp_in)
+            # fieldnames = ['asset_id', 'lon', 'lat', 'taxonomy']
+
+            # for qta_key, qta in quantities.items():
+            #     fieldnames += [qta['field']]
+
+            # csv_out = csv.DictWriter(fp_out, fieldnames)
+            # csv_out.writeheader()
+            # for row_in in csv_in:
+            #     csv_out.writerow({name: row_in[name] for name in fieldnames})
+            # fp_out.close()
+
+            # --- OLD IMPLEMENTATION: FINISH ---
+
+            with tempfile.TemporaryDirectory() as tempdir:
+                arch_filename = os.path.join(tempdir, 'damage_stats.zip')
+                with open(arch_filename, "wb") as fp_out:
+                    fp_out.write(damages_stats.content)
+                with ZipFile(arch_filename, "r") as zip_archive:
+                    zip_archive.extractall(tempdir)
+
+                print('LISTDIR: %s' % os.listdir(tempdir))
+                print('calc_id: %d' % int(calc_id))
+                fp_out = tempfile.NamedTemporaryFile(mode="w", delete=False)
+                print('CSVOUT avg_damages: %s' % fp_out.name)
+                meanqua_fname = ['avg_damages-mean_%d.csv',
+                                 'avg_damages-quantile-0.05_%d.csv',
+                                 'avg_damages-quantile-0.95_%d.csv']
+
+                fp_in = {}
+                csv_in = {}
+                fieldnames_comm = ['asset_id', 'lon', 'lat', 'taxonomy']
+                fieldnames = fieldnames_comm[:]
+                for sfx, fname in list(zip(meanqua_sfx, meanqua_fname)):
+                    fp_in[sfx] = open(os.path.join(tempdir, fname % int(calc_id)))
+                    # skip info header
+                    next(fp_in[sfx])
+
+                    csv_in[sfx] = csv.DictReader(fp_in[sfx])
+                    for qta_key, qta in quantities.items():
+                        fieldnames += ["%s_%s" % (qta['field'], sfx)]
+
+                csv_out = csv.DictWriter(fp_out, fieldnames)
+                csv_out.writeheader()
+                row = {}
+
+                for row['mean'], row['qt05'], row['qt95'] in zip(
+                        csv_in['mean'], csv_in['qt05'], csv_in['qt95']):
+                    csv_row = {name: row['mean'][name] for name in fieldnames_comm}
+
+                    for sfx in meanqua_sfx:
+                        for qta_key, qta in quantities.items():
+                            k = "%s_%s" % (qta['field'], sfx)
+                            v = row[sfx][qta['field']]
+                            csv_row[k] = v
+                    csv_out.writerow(csv_row)
+                fp_out.close()
 
             # create VectorLayer from filtered CSV file
             lines_to_skip_count = 0
