@@ -29,6 +29,8 @@ from zipfile import ZipFile
 import bisect
 from requests import Session
 
+import pprint
+
 from qgis.core import Qgis
 from qgis.server import QgsService, QgsServerProjectUtils, QgsServerSettings
 from qgis.core import (
@@ -646,15 +648,18 @@ class EWMS(QgsService):
             release_lock(lock_filename)
 
     def _oq_engine_calc2map_scenario_damage(self, request, response, project, engine_url):
+        meanqua_sfx = ['mean', 'qt05', 'qt95']
         qta_init = {
             'lay': None,
             'dp': None,
             'descr': None,
             'ramp_col': None,
-            'tot': None,
-            'div': None,
-            'maggr': None,
             }
+
+        for sfx in meanqua_sfx:
+            qta_init['tot_%s' % sfx] = None
+            qta_init['div_%s' % sfx] = None
+            qta_init['maggr_%s' % sfx] = None
 
         quantities = {}
 
@@ -920,12 +925,14 @@ class EWMS(QgsService):
             points_layer = _create_layer_from_selected(points_layer_csv, with_attributes=True)
             points_layer_csv.removeSelection()
 
+            print('points_layer creation: finish')
+
             if not points_layer.isValid():
                 response.setStatusCode(500)
                 response.write("calc2map: 'Unable to copy points_layer'")
                 return
 
-            # Load another project
+            # Load project template
             project.read('/io/data/_templates/Papers/PapersTmpl.qgs')
             gem_log('calc2map: project name: %s' % project.fileName(),
                     Qgis.Info)
@@ -950,10 +957,10 @@ class EWMS(QgsService):
                 proj_info[qta_key] = {'rank_abs': [],
                                       'rank_rel': []}
                 for aggr_key in aggrs_by:
-                    proj_info[qta_key][aggr_key] = {
-                        'tot': {}
-                    }
-
+                    proj_info[qta_key][aggr_key] = {}
+                    for sfx in meanqua_sfx:
+                        print('YYYYY: qta_key %s, aggr_key: %s, tot_%s' % (qta_key, aggr_key, sfx))
+                        proj_info[qta_key][aggr_key]['tot_%s' % sfx] = {}
                 qta['lay'] = QgsVectorLayer(
                     'Polygon?crs=epsg:4326', qta['descr'], 'memory')
 
@@ -1008,11 +1015,12 @@ class EWMS(QgsService):
                                 Qgis.Info)
 
                     for qta_key, qta in quantities.items():
-                        qta['tot'] = 0.0
                         qta['div'] = 0.0
-                        qta['maggr'] = {}
-                        for aggr_key in aggrs_by:
-                            qta['maggr'][aggr_key] = {}
+                        for sfx in meanqua_sfx:
+                            qta['tot_%s' % sfx] = 0.0
+                            qta['maggr_%s' % sfx] = {}
+                            for aggr_key in aggrs_by:
+                                qta['maggr_%s' % sfx][aggr_key] = {}
 
                     for feat_idx, feat in enumerate(points_layer.selectedFeatures()):
                         if MAX_FEATURES != -1 and feat_idx == MAX_FEATURES:
@@ -1032,33 +1040,40 @@ class EWMS(QgsService):
                             aggregate_by[aggr_key] = aggr['get'](feat['taxonomy'])
 
                         for qta_key, qta in quantities.items():
-                            qta['tot'] += feat[qta['field']]
+                            for sfx in meanqua_sfx:
+                                qta['tot_%s' % sfx] += feat["%s_%s" % (qta['field'], sfx)]
                             qta['div'] += feat_exposure[qta_key]
 
                         for aggr_key, item_key in aggregate_by.items():
                             for qta_key, qta in quantities.items():
-                                if item_key in qta['maggr'][aggr_key]:
-                                    qta['maggr'][aggr_key][item_key] += feat[qta['field']]
-                                else:
-                                    qta['maggr'][aggr_key][item_key] = feat[qta['field']]
+                                for sfx in meanqua_sfx:
+                                    if item_key in qta['maggr_%s' % sfx][aggr_key]:
+                                        qta['maggr_%s' % sfx][aggr_key][item_key] += feat[
+                                            "%s_%s" % (qta['field'], sfx)]
+                                    else:
+                                        qta['maggr_%s' % sfx][aggr_key][item_key] = feat[
+                                            "%s_%s" % (qta['field'], sfx)]
 
                     for qta_key, qta in quantities.items():
-                        quantity_maggr = qta['maggr']
-                        for aggr_key in quantity_maggr:
-                            for item_key, item_val in quantity_maggr[aggr_key].items():
-                                if item_key not in proj_info[qta_key][aggr_key]['tot']:
-                                    proj_info[qta_key][aggr_key]['tot'][item_key] = item_val
-                                else:
-                                    proj_info[qta_key][aggr_key]['tot'][item_key] += item_val
+                        for sfx in meanqua_sfx:
+                            quantity_maggr = qta['maggr_%s' % sfx]
+                            for aggr_key in quantity_maggr:
+                                for item_key, item_val in quantity_maggr[aggr_key].items():
+                                    print('XXXXX: qta_key %s, aggr_key: %s, tot_%s' % (qta_key, aggr_key, sfx))
+                                    pprint.pprint(proj_info)
+                                    if item_key not in proj_info[qta_key][aggr_key]['tot_%s' % sfx]:
+                                        proj_info[qta_key][aggr_key]['tot_%s' % sfx][item_key] = item_val
+                                    else:
+                                        proj_info[qta_key][aggr_key]['tot_%s' % sfx][item_key] += item_val
 
                         rank_names = []
                         for depth in range(1, int(adm_level) + 1):
                             rank_names.append(zonal_feat['NAME_%d' % depth])
 
                         proj_info[qta_key]['rank_abs'].append({'id':zonal_feat.id(),
-                                                               'names': rank_names, 'value': qta['tot']})
+                                                               'names': rank_names, 'value': qta['tot_mean']})
                         proj_info[qta_key]['rank_rel'].append({'id':zonal_feat.id(),
-                                                               'names': rank_names, 'value': qta['tot'] / qta['div']})
+                                                               'names': rank_names, 'value': qta['tot_mean'] / qta['div']})
 
                         for rank_key in ['rank_abs', 'rank_rel']:
                             # sort ranked zones
@@ -1071,8 +1086,9 @@ class EWMS(QgsService):
                     #       f" fatal: {fatalities_sum}")
 
                     for qta_key, qta in quantities.items():
-                        if qta['tot'] == 0.0:
+                        if qta['tot_mean'] == 0.0:
                             continue
+
                         with edit(qta['lay']):
                             feat_out = QgsFeature(qta['lay'].fields())
                             feat_out.setGeometry(zonal_feat.geometry())
@@ -1080,13 +1096,16 @@ class EWMS(QgsService):
                             for depth in range(1, int(adm_level) + 1):
                                 attrs += [zonal_feat['ID_%d' % depth],
                                           zonal_feat['NAME_%d' % depth]]
-                            attrs += [json.dumps(qta['tot']), json.dumps(qta['maggr'])]
+                            attrs += [json.dumps(qta['tot_mean']), json.dumps(qta['maggr_mean'])]
                             feat_out.setAttributes(attrs)
                             qta['dp'].addFeatures([feat_out])
                 else:
                     print('N FEATS: ZERO')
                 zonal_layer.removeSelection()
 
+            pprint.pprint(proj_info)
+
+            print('Analize data to create custom symbology < 1.0 + N groups with same numerosity')
             #
             #  Analize data to create custom symbology < 1.0 + N groups with same numerosity
             #
