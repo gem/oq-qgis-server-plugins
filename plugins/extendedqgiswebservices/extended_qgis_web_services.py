@@ -419,7 +419,7 @@ class EWMS(QgsService):
 
         eng_proto = 'http'
         eng_name = 'host.docker.internal'
-        eng_port = '8800'
+        eng_port = os.getenv('HOST_PORT', '8800')
         engine_url = '%s://%s:%s' % (eng_proto, eng_name, eng_port)
 
         method = getattr(self, method_name)
