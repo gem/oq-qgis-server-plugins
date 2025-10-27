@@ -665,19 +665,19 @@ class EWMS(QgsService):
 
         quantities['fatalities'] = qta_init.copy()
         quantities['fatalities']['descr'] = 'Fatalities'
-        quantities['fatalities']['ramp_col'] = 'Greens'
+        quantities['fatalities']['ramp_col'] = '#E94E4E'
         quantities['fatalities']['field'] = 'structural-fatalities'
         quantities['fatalities']['rel_fields'] = ['value-residents']
 
         quantities['economic_losses'] = qta_init.copy()
-        quantities['economic_losses']['descr'] = 'Economic Losses (USD)'
-        quantities['economic_losses']['ramp_col'] =  'Reds'
+        quantities['economic_losses']['descr'] = 'Economic Losses'
+        quantities['economic_losses']['ramp_col'] =  '#4EC5C1'
         quantities['economic_losses']['field'] = 'structural-losses'
         quantities['economic_losses']['rel_fields'] = ['value-structural','value-nonstructural','value-contents']
 
         quantities['complete_damage'] = qta_init.copy()
         quantities['complete_damage']['descr'] = 'Buildings Beyond Repair'
-        quantities['complete_damage']['ramp_col'] = 'Blues'
+        quantities['complete_damage']['ramp_col'] = '#7057A3'
         quantities['complete_damage']['field'] = 'structural-complete'
         quantities['complete_damage']['rel_fields'] = ['value-number']
 
@@ -1192,11 +1192,16 @@ class EWMS(QgsService):
                 real_lays.append(out_real_layer)
                 symbol = QgsSymbol.defaultSymbol(out_real_layer.geometryType())
                 symbol.setOpacity(1)
-                ramp_type_idx = default_color_ramp_names.index(qta['ramp_col'])
-                symbol.setColor(QColor(RAMP_EXTREME_COLORS[qta['ramp_col']]['top']))
+                # ramp_type_idx = default_color_ramp_names.index(qta['ramp_col'])
+                # symbol.setColor(QColor(RAMP_EXTREME_COLORS[qta['ramp_col']]['top']))
 
-                ramp = default_qgs_style.colorRamp(
-                    default_color_ramp_names[ramp_type_idx])
+                # ramp = default_qgs_style.colorRamp(
+                #     default_color_ramp_names[ramp_type_idx])
+
+                ramp = QgsGradientColorRamp(
+                    QColor('#FFFFFF'),
+                    QColor(qta['ramp_col'])
+                )
 
                 # ramp.invert() (to switch colors)
 
