@@ -1148,6 +1148,7 @@ class EWMS(QgsService):
 
                 # create ceiled (integers as limits) ranges
                 lay_classes = lays_classes[qta_key] = []
+                last_upper = 0
                 for lay_class in lay_classes_float:
                     if lay_class.lowerBound() == float('-inf'):
                         lay_classes.append(lay_class)
