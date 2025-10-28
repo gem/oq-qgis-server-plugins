@@ -671,7 +671,7 @@ class EWMS(QgsService):
 
         quantities['economic_losses'] = qta_init.copy()
         quantities['economic_losses']['descr'] = 'Economic Losses'
-        quantities['economic_losses']['ramp_col'] =  '#4EC5C1'
+        quantities['economic_losses']['ramp_col'] =  '#F4A261'
         quantities['economic_losses']['field'] = 'structural-losses'
         quantities['economic_losses']['rel_fields'] = ['value-structural','value-nonstructural','value-contents']
 
