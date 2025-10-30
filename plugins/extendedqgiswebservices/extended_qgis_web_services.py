@@ -198,6 +198,23 @@ def _style_curves(layer, style_by):
 
 
 class EWMS(QgsService):
+    @staticmethod
+    def _session_engine_login(session, host_user, host_pass, engine_url):
+        try:
+            login_url = engine_url + '/accounts/ajax_login/'
+            auth_resp = session.post(
+                login_url, data={
+                    "username": host_user,
+                    "password": host_pass
+                },
+                timeout=10,
+            )
+        except Exception as exc:
+            return (500, 'authorization raise an exception: %s' % str(exc))
+        if auth_resp.status_code != 200:
+            return (auth_resp.status_code, auth_resp.status_code)
+        return (200, None)
+
 
     def __init__(self):
         QgsService.__init__(self)
@@ -443,7 +460,15 @@ class EWMS(QgsService):
 
         session = Session()
 
-        # engine_login(hostname, None, None, session)
+        host_user = os.getenv('HOST_USER', False)
+        host_pass = os.getenv('HOST_PASS', False)
+        if host_user and host_pass:
+            ret_status, ret_msg =  self._session_engine_login(
+                session, host_user, host_pass, engine_url)
+            if ret_status != 200:
+                response.setStatusCode(ret_status)
+                response.write('calc2map: %s' % ret_msg)
+                return
 
         gem_log('calc2map: pre get', Qgis.Critical)
         oqparam_req = '%s/v1/calc/%d/extract/oqparam' % (
@@ -705,15 +730,35 @@ class EWMS(QgsService):
         adm_level = request.parameter('ADM_LEVEL')
         session = Session()
 
-        oqparam_req = '%s/v1/calc/%d/results' % (
+        host_user = os.getenv('HOST_USER', False)
+        host_pass = os.getenv('HOST_PASS', False)
+        if host_user and host_pass:
+            ret_status, ret_msg =  self._session_engine_login(
+                session, host_user, host_pass, engine_url)
+            if ret_status != 200:
+                response.setStatusCode(ret_status)
+                response.write('calc2map: %s' % ret_msg)
+                return
+
+        gem_log('calc2map: pre get', Qgis.Critical)
+        oqparam_req = '%s/v1/calc/%d/extract/oqparam' % (
             engine_url, int(calc_id),)
-        gem_log('calc2map: pre oq-param: [%s]' % oqparam_req, Qgis.Info)
-        print('OQDOWNLOAD: Calc_Result: %s' % oqparam_req)
-        resp = session.get(
+        gem_log('calc2map: pre oq-param: [%s]' % oqparam_req, Qgis.Critical)
+        oqparam_resp = session.get(
             oqparam_req, timeout=100, verify=False, allow_redirects=False)
+        gem_log('calc2map: post oq-param', Qgis.Critical)
+        js = bytes(numpy.load(io.BytesIO(oqparam_resp.content))['json'])
+        calc = json.loads(js)
+
+        results_req = '%s/v1/calc/%d/results' % (
+            engine_url, int(calc_id),)
+        gem_log('calc2map: pre results: [%s]' % results_req, Qgis.Info)
+        print('OQDOWNLOAD: Calc_Result: %s' % results_req)
+        results_resp = session.get(
+            results_req, timeout=100, verify=False, allow_redirects=False)
 
         gem_log('calc2map: post oq-param', Qgis.Info)
-        damages_stats_entries = [x for x in json.load(io.BytesIO(resp.content)) if
+        damages_stats_entries = [x for x in json.load(io.BytesIO(results_resp.content)) if
                               x['type'] == 'damages-stats']
         if len(damages_stats_entries) != 1:
             response.setStatusCode(500)
@@ -726,7 +771,7 @@ class EWMS(QgsService):
                                     timeout=600, verify=False, allow_redirects=False)
 
         # extract and populate exposure dictionary
-        exposure_entries = [x for x in json.load(io.BytesIO(resp.content))
+        exposure_entries = [x for x in json.load(io.BytesIO(results_resp.content))
                             if x['type'] == 'exposure']
         if len(exposure_entries) != 1:
             response.setStatusCode(500)
@@ -951,11 +996,12 @@ class EWMS(QgsService):
             zonal_layer = QgsVectorLayer(zonal_uri, 'italy_adm%s' % adm_level, 'ogr')
 
 
-            proj_info = {}
+            proj_info = {'proj_description': calc['description']}
 
             for qta_key, qta in quantities.items():
                 proj_info[qta_key] = {'rank_abs': [],
-                                      'rank_rel': []}
+                                      'rank_rel': [],
+                                      'tot': 0}
                 for aggr_key in aggrs_by:
                     proj_info[qta_key][aggr_key] = {}
                     for sfx in meanqua_sfx:
@@ -1074,6 +1120,7 @@ class EWMS(QgsService):
                                                                'names': rank_names, 'value': qta['tot_mean']})
                         proj_info[qta_key]['rank_rel'].append({'id':zonal_feat.id(),
                                                                'names': rank_names, 'value': qta['tot_mean'] / qta['div']})
+                        proj_info[qta_key]['tot'] = qta['div']
 
                         for rank_key in ['rank_abs', 'rank_rel']:
                             # sort ranked zones
