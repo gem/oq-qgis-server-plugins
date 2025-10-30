@@ -996,17 +996,18 @@ class EWMS(QgsService):
             zonal_layer = QgsVectorLayer(zonal_uri, 'italy_adm%s' % adm_level, 'ogr')
 
 
-            proj_info = {'proj_description': calc['description']}
+            proj_info = {'proj_description': calc['description'],
+                         'quantity': {}}
 
             for qta_key, qta in quantities.items():
-                proj_info[qta_key] = {'rank_abs': [],
-                                      'rank_rel': [],
-                                      'tot': 0}
+                proj_info['quantity'][qta_key] = {'rank_abs': [],
+                                                  'rank_rel': [],
+                                                  'tot': 0}
                 for aggr_key in aggrs_by:
-                    proj_info[qta_key][aggr_key] = {}
+                    proj_info['quantity'][qta_key][aggr_key] = {}
                     for sfx in meanqua_sfx:
                         print('YYYYY: qta_key %s, aggr_key: %s, tot_%s' % (qta_key, aggr_key, sfx))
-                        proj_info[qta_key][aggr_key]['tot_%s' % sfx] = {}
+                        proj_info['quantity'][qta_key][aggr_key]['tot_%s' % sfx] = {}
                 qta['lay'] = QgsVectorLayer(
                     'Polygon?crs=epsg:4326', qta['descr'], 'memory')
 
@@ -1106,28 +1107,27 @@ class EWMS(QgsService):
                             for aggr_key in quantity_maggr:
                                 for item_key, item_val in quantity_maggr[aggr_key].items():
                                     print('XXXXX: qta_key %s, aggr_key: %s, tot_%s' % (qta_key, aggr_key, sfx))
-                                    pprint.pprint(proj_info)
-                                    if item_key not in proj_info[qta_key][aggr_key]['tot_%s' % sfx]:
-                                        proj_info[qta_key][aggr_key]['tot_%s' % sfx][item_key] = item_val
+                                    if item_key not in proj_info['quantity'][qta_key][aggr_key]['tot_%s' % sfx]:
+                                        proj_info['quantity'][qta_key][aggr_key]['tot_%s' % sfx][item_key] = item_val
                                     else:
-                                        proj_info[qta_key][aggr_key]['tot_%s' % sfx][item_key] += item_val
+                                        proj_info['quantity'][qta_key][aggr_key]['tot_%s' % sfx][item_key] += item_val
 
                         rank_names = []
                         for depth in range(1, int(adm_level) + 1):
                             rank_names.append(zonal_feat['NAME_%d' % depth])
 
-                        proj_info[qta_key]['rank_abs'].append({'id':zonal_feat.id(),
+                        proj_info['quantity'][qta_key]['rank_abs'].append({'id':zonal_feat.id(),
                                                                'names': rank_names, 'value': qta['tot_mean']})
-                        proj_info[qta_key]['rank_rel'].append({'id':zonal_feat.id(),
+                        proj_info['quantity'][qta_key]['rank_rel'].append({'id':zonal_feat.id(),
                                                                'names': rank_names, 'value': qta['tot_mean'] / qta['div']})
-                        proj_info[qta_key]['tot'] = qta['div']
+                        proj_info['quantity'][qta_key]['tot'] = qta['div']
 
                         for rank_key in ['rank_abs', 'rank_rel']:
                             # sort ranked zones
-                            new_rank = sorted(proj_info[qta_key][rank_key], key=lambda d: d['value'], reverse=True)
-                            proj_info[qta_key][rank_key] = new_rank
+                            new_rank = sorted(proj_info['quantity'][qta_key][rank_key], key=lambda d: d['value'], reverse=True)
+                            proj_info['quantity'][qta_key][rank_key] = new_rank
                             # riduce rank to 10 elements
-                            proj_info[qta_key][rank_key] = proj_info[qta_key][rank_key][:10]
+                            proj_info['quantity'][qta_key][rank_key] = proj_info['quantity'][qta_key][rank_key][:10]
 
                     # print(f"cdam: {complete_damage_sum}, ecloss: {economic_losses_sum},"
                     #       f" fatal: {fatalities_sum}")
