@@ -1002,7 +1002,7 @@ class EWMS(QgsService):
             for qta_key, qta in quantities.items():
                 proj_info['quantity'][qta_key] = {'rank_abs': [],
                                                   'rank_rel': [],
-                                                  'tot': 0}
+                                                  'tot': 0.0}
                 for aggr_key in aggrs_by:
                     proj_info['quantity'][qta_key][aggr_key] = {}
                     for sfx in meanqua_sfx:
@@ -1090,6 +1090,7 @@ class EWMS(QgsService):
                             for sfx in meanqua_sfx:
                                 qta['tot_%s' % sfx] += feat["%s_%s" % (qta['field'], sfx)]
                             qta['div'] += feat_exposure[qta_key]
+                            proj_info['quantity'][qta_key]['tot'] += feat["%s_mean" % (qta['field'],)]
 
                         for aggr_key, item_key in aggregate_by.items():
                             for qta_key, qta in quantities.items():
@@ -1120,7 +1121,6 @@ class EWMS(QgsService):
                                                                'names': rank_names, 'value': qta['tot_mean']})
                         proj_info['quantity'][qta_key]['rank_rel'].append({'id':zonal_feat.id(),
                                                                'names': rank_names, 'value': qta['tot_mean'] / qta['div']})
-                        proj_info['quantity'][qta_key]['tot'] = qta['div']
 
                         for rank_key in ['rank_abs', 'rank_rel']:
                             # sort ranked zones
