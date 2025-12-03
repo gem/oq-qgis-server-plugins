@@ -1119,8 +1119,9 @@ class EWMS(QgsService):
 
                         proj_info['quantity'][qta_key]['rank_abs'].append({'id':zonal_feat.id(),
                                                                'names': rank_names, 'value': qta['tot_mean']})
-                        proj_info['quantity'][qta_key]['rank_rel'].append({'id':zonal_feat.id(),
-                                                               'names': rank_names, 'value': qta['tot_mean'] / qta['div']})
+                        proj_info['quantity'][qta_key]['rank_rel'].append(
+                            {'id':zonal_feat.id(),
+                             'names': rank_names, 'value': (qta['tot_mean'] / qta['div']) if qta['div'] != 0 else 0})
 
                         for rank_key in ['rank_abs', 'rank_rel']:
                             # sort ranked zones
