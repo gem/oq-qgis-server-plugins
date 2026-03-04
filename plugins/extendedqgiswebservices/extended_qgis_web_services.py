@@ -1281,7 +1281,7 @@ class EWMS(QgsService):
 
                     # ramp.color(0-1 included float)
                     color = ramp.color(
-                        float(cla_idx) / float(len(lay_classes) - 1))
+                        float(cla_idx) / float(1 if len(lay_classes) < 2 else len(lay_classes) - 1))
                     cla_rule.setSymbol(QgsFillSymbol.createSimple(
                     {'color':
                      '%d,%d,%d' % (color.red(), color.green(), color.blue())}))
