@@ -29,8 +29,6 @@ from zipfile import ZipFile
 import bisect
 from requests import Session
 
-import pprint
-
 from qgis.core import Qgis
 from qgis.server import QgsService, QgsServerProjectUtils, QgsServerSettings
 from qgis.core import (
@@ -673,18 +671,15 @@ class EWMS(QgsService):
             release_lock(lock_filename)
 
     def _oq_engine_calc2map_scenario_damage(self, request, response, project, engine_url):
-        meanqua_sfx = ['mean', 'qt05', 'qt95']
         qta_init = {
             'lay': None,
             'dp': None,
             'descr': None,
             'ramp_col': None,
+            'tot': None,
+            'div': None,
+            'maggr': None,
             }
-
-        for sfx in meanqua_sfx:
-            qta_init['tot_%s' % sfx] = None
-            qta_init['div_%s' % sfx] = None
-            qta_init['maggr_%s' % sfx] = None
 
         quantities = {}
 
@@ -714,9 +709,31 @@ class EWMS(QgsService):
 
         aggrs_by = {
             'material': {
+                'name': 'MATERIAL_TYPE',
+                'metrics': {
+                    'complete_damage': 'dmg_4',
+                    'fatalities':  'fatalities',
+                    'economic_losses': 'losses'
+                    },
+                'stats': {
+                    "mean": "tot_mean",
+                    "quantile-0.05": "tot_qt05",
+                    "quantile-0.95": "tot_qt95"
+                    },
                 'get': _get_material
             },
             'occupancy': {
+                'name': 'OCCUPANCY',
+                'metrics': {
+                    'complete_damage': 'dmg_4',
+                    'fatalities':  'fatalities',
+                    'economic_losses': 'losses'
+                    },
+                'stats': {
+                    "mean": "tot_mean",
+                    "quantile-0.05": "tot_qt05",
+                    "quantile-0.95": "tot_qt95"
+                    },
                 'get': _get_occupancy
             }
         }
@@ -756,6 +773,19 @@ class EWMS(QgsService):
         print('OQDOWNLOAD: Calc_Result: %s' % results_req)
         results_resp = session.get(
             results_req, timeout=100, verify=False, allow_redirects=False)
+
+        gem_log('calc2map: post oq-param', Qgis.Info)
+        aggrisk_stats_entries = [x for x in json.load(io.BytesIO(results_resp.content)) if
+                              x['type'] == 'aggrisk-stats']
+        if len(aggrisk_stats_entries) != 1:
+            response.setStatusCode(500)
+            response.write("calc2map: 'aggrisk-stats' output not found")
+            return
+
+        # retrieve aggrisk-stats output
+        print('OQDOWNLOAD: aggrisk-stats: %s' % aggrisk_stats_entries[0]['url'])
+        aggrisk_stats = session.get("%s" % aggrisk_stats_entries[0]['url'],
+                                    timeout=600, verify=False, allow_redirects=False)
 
         gem_log('calc2map: post oq-param', Qgis.Info)
         damages_stats_entries = [x for x in json.load(io.BytesIO(results_resp.content)) if
@@ -862,7 +892,7 @@ class EWMS(QgsService):
         # this 'try...finally' is to be able to unlock the locked file
         # at the end of project creation procedure and remove temporary csv file
         try:
-            headers = damages_stats.headers
+            headers = aggrisk_stats.headers
             content_type = headers.get('content-type').split(';')[0]
             if content_type.upper() != 'APPLICATION/X-ZIP':
                 response.setStatusCode(400)
@@ -872,7 +902,7 @@ class EWMS(QgsService):
                     json.dumps({
                         'status': 'fail',
                         'reason': (
-                            "for 'damages_stats' a zip file was expected,"
+                            "for 'aggrisk_stats' a zip file was expected,"
                             " instead a '%s' is retrieved, quantiles are"
                             " required as output for this calculation?" %
                             content_type)
@@ -880,29 +910,12 @@ class EWMS(QgsService):
 
                 return
 
-            # --- OLD IMPLEMENTATION: BEGIN ---
-            # fp_out = tempfile.NamedTemporaryFile(mode="w", delete=False)
-            # fp_in = io.StringIO(damages_stats.text)
-            # # skip info header
-            # next(fp_in)
-            # csv_in = csv.DictReader(fp_in)
-            # fieldnames = ['asset_id', 'lon', 'lat', 'taxonomy']
-
-            # for qta_key, qta in quantities.items():
-            #     fieldnames += [qta['field']]
-
-            # csv_out = csv.DictWriter(fp_out, fieldnames)
-            # csv_out.writeheader()
-            # for row_in in csv_in:
-            #     csv_out.writerow({name: row_in[name] for name in fieldnames})
-            # fp_out.close()
-
-            # --- OLD IMPLEMENTATION: FINISH ---
+            aggrs = {}
 
             with tempfile.TemporaryDirectory() as tempdir:
-                arch_filename = os.path.join(tempdir, 'damage_stats.zip')
+                arch_filename = os.path.join(tempdir, 'aggrisk_stats.zip')
                 with open(arch_filename, "wb") as fp_out:
-                    fp_out.write(damages_stats.content)
+                    fp_out.write(aggrisk_stats.content)
                 with ZipFile(arch_filename, "r") as zip_archive:
                     zip_archive.extractall(tempdir)
 
@@ -910,38 +923,67 @@ class EWMS(QgsService):
                 print('calc_id: %d' % int(calc_id))
                 fp_out = tempfile.NamedTemporaryFile(mode="w", delete=False)
                 print('CSVOUT avg_damages: %s' % fp_out.name)
-                meanqua_fname = ['avg_damages-mean_%d.csv',
-                                 'avg_damages-quantile-0.05_%d.csv',
-                                 'avg_damages-quantile-0.95_%d.csv']
 
-                fp_in = {}
-                csv_in = {}
-                fieldnames_comm = ['asset_id', 'lon', 'lat', 'taxonomy']
-                fieldnames = fieldnames_comm[:]
-                for sfx, fname in list(zip(meanqua_sfx, meanqua_fname)):
-                    fp_in[sfx] = open(os.path.join(tempdir, fname % int(calc_id)))
+                for aggr_key in aggrs_by:
+                    aggr_by = aggrs_by[aggr_key]
+                    fp_in = open(os.path.join(tempdir, 'aggrisk-stats-%s_%d.csv' % (
+                                              aggr_by['name'], int(calc_id))))
                     # skip info header
-                    next(fp_in[sfx])
+                    next(fp_in)
 
-                    csv_in[sfx] = csv.DictReader(fp_in[sfx])
-                    for qta_key, qta in quantities.items():
-                        fieldnames += ["%s_%s" % (qta['field'], sfx)]
+                    csv_in = csv.DictReader(fp_in)
+                    for row in csv_in:
+                        for metric_key in aggr_by['metrics']:
+                            metric_field = aggr_by['metrics'][metric_key]
+                            if metric_key not in aggrs:
+                                aggr_by_metric = aggrs[metric_key] = {}
+                            else:
+                                aggr_by_metric = aggrs[metric_key]
+
+                            if aggr_key not in aggr_by_metric:
+                                aggr = aggr_by_metric[aggr_key] = {}
+                            else:
+                                aggr = aggr_by_metric[aggr_key]
+
+                            meanqua_key = aggr_by['stats'][row['stat']]
+                            if meanqua_key not in aggr:
+                                aggr4meanqua = aggr[meanqua_key] = {}
+                            else:
+                                aggr4meanqua = aggr[meanqua_key]
+
+                            aggr4meanqua[row[aggr_by['name']]] = row[metric_field]
+
+            headers = damages_stats.headers
+            content_type = headers.get('content-type').split(';')[0]
+            if content_type.upper() != 'TEXT/PLAIN':
+                response.setStatusCode(400)
+                response.setHeader('content-type',
+                                   'application/json; charset=utf-8')
+                response.write(
+                    json.dumps({
+                        'status': 'fail',
+                        'reason': (
+                            "for 'damages_stats' a json file was expected,"
+                            " instead a '%s' is retrieved, quantiles are"
+                            " required as output for this calculation?" %
+                            content_type)
+                    }, indent=4, sort_keys=True))
+                return
+
+            with tempfile.NamedTemporaryFile(mode="w", delete=False) as fp_out:
+                fp_in = io.StringIO(damages_stats.text)
+                # skip info header
+                next(fp_in)
+                csv_in = csv.DictReader(fp_in)
+                fieldnames = ['asset_id', 'lon', 'lat', 'taxonomy']
+
+                for qta_key, qta in quantities.items():
+                    fieldnames += [qta['field']]
 
                 csv_out = csv.DictWriter(fp_out, fieldnames)
                 csv_out.writeheader()
-                row = {}
-
-                for row['mean'], row['qt05'], row['qt95'] in zip(
-                        csv_in['mean'], csv_in['qt05'], csv_in['qt95']):
-                    csv_row = {name: row['mean'][name] for name in fieldnames_comm}
-
-                    for sfx in meanqua_sfx:
-                        for qta_key, qta in quantities.items():
-                            k = "%s_%s" % (qta['field'], sfx)
-                            v = row[sfx][qta['field']]
-                            csv_row[k] = v
-                    csv_out.writerow(csv_row)
-                fp_out.close()
+                for row_in in csv_in:
+                    csv_out.writerow({name: row_in[name] for name in fieldnames})
 
             # create VectorLayer from filtered CSV file
             lines_to_skip_count = 0
@@ -1002,12 +1044,11 @@ class EWMS(QgsService):
             for qta_key, qta in quantities.items():
                 proj_info['quantity'][qta_key] = {'rank_abs': [],
                                                   'rank_rel': [],
-                                                  'tot': 0.0}
+                                                  'tot': 0.0} | aggrs[qta_key]
                 for aggr_key in aggrs_by:
-                    proj_info['quantity'][qta_key][aggr_key] = {}
-                    for sfx in meanqua_sfx:
-                        print('YYYYY: qta_key %s, aggr_key: %s, tot_%s' % (qta_key, aggr_key, sfx))
-                        proj_info['quantity'][qta_key][aggr_key]['tot_%s' % sfx] = {}
+                    # proj_info['quantity'][qta_key][aggr_key] = {}
+                    print('YYYYY: qta_key %s, aggr_key: %s, tot' % (qta_key, aggr_key))
+                    proj_info['quantity'][qta_key][aggr_key]['tot'] = {}
                 qta['lay'] = QgsVectorLayer(
                     'Polygon?crs=epsg:4326', qta['descr'], 'memory')
 
@@ -1063,11 +1104,10 @@ class EWMS(QgsService):
 
                     for qta_key, qta in quantities.items():
                         qta['div'] = 0.0
-                        for sfx in meanqua_sfx:
-                            qta['tot_%s' % sfx] = 0.0
-                            qta['maggr_%s' % sfx] = {}
-                            for aggr_key in aggrs_by:
-                                qta['maggr_%s' % sfx][aggr_key] = {}
+                        qta['tot'] = 0.0
+                        qta['maggr'] = {}
+                        for aggr_key in aggrs_by:
+                            qta['maggr'][aggr_key] = {}
 
                     for feat_idx, feat in enumerate(points_layer.selectedFeatures()):
                         if MAX_FEATURES != -1 and feat_idx == MAX_FEATURES:
@@ -1087,41 +1127,38 @@ class EWMS(QgsService):
                             aggregate_by[aggr_key] = aggr['get'](feat['taxonomy'])
 
                         for qta_key, qta in quantities.items():
-                            for sfx in meanqua_sfx:
-                                qta['tot_%s' % sfx] += feat["%s_%s" % (qta['field'], sfx)]
+                            qta['tot'] += feat["%s" % qta['field']]
                             qta['div'] += feat_exposure[qta_key]
-                            proj_info['quantity'][qta_key]['tot'] += feat["%s_mean" % (qta['field'],)]
+                            proj_info['quantity'][qta_key]['tot'] += feat["%s" % (qta['field'],)]
 
                         for aggr_key, item_key in aggregate_by.items():
                             for qta_key, qta in quantities.items():
-                                for sfx in meanqua_sfx:
-                                    if item_key in qta['maggr_%s' % sfx][aggr_key]:
-                                        qta['maggr_%s' % sfx][aggr_key][item_key] += feat[
-                                            "%s_%s" % (qta['field'], sfx)]
-                                    else:
-                                        qta['maggr_%s' % sfx][aggr_key][item_key] = feat[
-                                            "%s_%s" % (qta['field'], sfx)]
+                                if item_key in qta['maggr'][aggr_key]:
+                                    qta['maggr'][aggr_key][item_key] += feat[
+                                        "%s" % qta['field']]
+                                else:
+                                    qta['maggr'][aggr_key][item_key] = feat[
+                                        "%s" % qta['field']]
 
                     for qta_key, qta in quantities.items():
-                        for sfx in meanqua_sfx:
-                            quantity_maggr = qta['maggr_%s' % sfx]
-                            for aggr_key in quantity_maggr:
-                                for item_key, item_val in quantity_maggr[aggr_key].items():
-                                    print('XXXXX: qta_key %s, aggr_key: %s, tot_%s' % (qta_key, aggr_key, sfx))
-                                    if item_key not in proj_info['quantity'][qta_key][aggr_key]['tot_%s' % sfx]:
-                                        proj_info['quantity'][qta_key][aggr_key]['tot_%s' % sfx][item_key] = item_val
-                                    else:
-                                        proj_info['quantity'][qta_key][aggr_key]['tot_%s' % sfx][item_key] += item_val
+                        quantity_maggr = qta['maggr']
+                        for aggr_key in quantity_maggr:
+                            for item_key, item_val in quantity_maggr[aggr_key].items():
+                                print('XXXXX: qta_key %s, aggr_key: %s, tot' % (qta_key, aggr_key))
+                                if item_key not in proj_info['quantity'][qta_key][aggr_key]['tot']:
+                                    proj_info['quantity'][qta_key][aggr_key]['tot'][item_key] = item_val
+                                else:
+                                    proj_info['quantity'][qta_key][aggr_key]['tot'][item_key] += item_val
 
                         rank_names = []
                         for depth in range(1, int(adm_level) + 1):
                             rank_names.append(zonal_feat['NAME_%d' % depth])
 
                         proj_info['quantity'][qta_key]['rank_abs'].append({'id':zonal_feat.id(),
-                                                               'names': rank_names, 'value': qta['tot_mean']})
+                                                               'names': rank_names, 'value': qta['tot']})
                         proj_info['quantity'][qta_key]['rank_rel'].append(
                             {'id':zonal_feat.id(),
-                             'names': rank_names, 'value': (qta['tot_mean'] / qta['div']) if qta['div'] != 0 else 0})
+                             'names': rank_names, 'value': (qta['tot'] / qta['div']) if qta['div'] != 0 else 0})
 
                         for rank_key in ['rank_abs', 'rank_rel']:
                             # sort ranked zones
@@ -1134,7 +1171,7 @@ class EWMS(QgsService):
                     #       f" fatal: {fatalities_sum}")
 
                     for qta_key, qta in quantities.items():
-                        if qta['tot_mean'] == 0.0:
+                        if qta['tot'] == 0.0:
                             continue
 
                         with edit(qta['lay']):
@@ -1144,14 +1181,14 @@ class EWMS(QgsService):
                             for depth in range(1, int(adm_level) + 1):
                                 attrs += [zonal_feat['ID_%d' % depth],
                                           zonal_feat['NAME_%d' % depth]]
-                            attrs += [json.dumps(qta['tot_mean']), json.dumps(qta['maggr_mean'])]
+                            attrs += [json.dumps(qta['tot']), json.dumps(qta['maggr'])]
                             feat_out.setAttributes(attrs)
                             qta['dp'].addFeatures([feat_out])
                 else:
                     print('N FEATS: ZERO')
                 zonal_layer.removeSelection()
 
-            pprint.pprint(proj_info)
+            # pprint(proj_info)
 
             print('Analize data to create custom symbology < 1.0 + N groups with same numerosity')
             #
