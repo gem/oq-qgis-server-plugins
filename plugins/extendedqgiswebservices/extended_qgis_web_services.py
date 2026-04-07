@@ -25,6 +25,7 @@ import math
 import numpy
 import json
 import tempfile
+# import debugpy
 from zipfile import ZipFile
 import bisect
 from requests import Session
@@ -472,11 +473,11 @@ class EWMS(QgsService):
         oqparam_req = '%s/v1/calc/%d/extract/oqparam' % (
             engine_url, int(calc_id),)
         gem_log('calc2map: pre oq-param: [%s]' % oqparam_req, Qgis.Critical)
-        resp = session.get(
+        oqparam_resp = session.get(
             oqparam_req, timeout=100, verify=False, allow_redirects=False)
 
         gem_log('calc2map: post oq-param', Qgis.Critical)
-        js = bytes(numpy.load(io.BytesIO(resp.content))['json'])
+        js = bytes(numpy.load(io.BytesIO(oqparam_resp.content))['json'])
         calc = json.loads(js)
 
         calc_imtls = (calc['risk_imtls'] if 'risk_imtls' in calc
@@ -521,7 +522,7 @@ class EWMS(QgsService):
             os.mkdir(project_folder)
             os.mkdir(layer_folder)
             for imt in imts[::-1]:
-                resp = session.get(
+                avg_gmf_resp = session.get(
                     '%s/v1/calc/%d/extract/avg_gmf?imt=%s' % (
                         engine_url, int(calc_id), imt),
                     timeout=100, verify=False, allow_redirects=False)
@@ -529,11 +530,11 @@ class EWMS(QgsService):
                 try:
                     if numpy.__version__ >= '1.24.0':
                         extracted_npz = numpy.load(
-                            io.BytesIO(resp.content), allow_pickle=False,
+                            io.BytesIO(avg_gmf_resp.content), allow_pickle=False,
                             max_header_size=100000)
                     else:
                         extracted_npz = numpy.load(
-                            io.BytesIO(resp.content), allow_pickle=False)
+                            io.BytesIO(avg_gmf_resp.content), allow_pickle=False)
                 except Exception as exc:
                     print('FIXME: failure here %s' % exc)
 
@@ -663,8 +664,7 @@ class EWMS(QgsService):
 
             response.setStatusCode(200)
             response.write(
-                json.dumps({'owner': 'mop',
-                            'uploaded_file': os.path.basename(
+                json.dumps({'uploaded_file': os.path.basename(
                                 archive_pathname)},
                            indent=4, sort_keys=True))
         finally:
@@ -743,6 +743,7 @@ class EWMS(QgsService):
 
         gem_log('calc2map_scenario_damage:BEGIN', Qgis.Info)
         calc_id = request.parameter('CALC_ID')
+        imts = request.parameter('IMTS').split(',')
         description = request.parameter('DESCRIPTION')
         adm_level = request.parameter('ADM_LEVEL')
         session = Session()
@@ -767,6 +768,15 @@ class EWMS(QgsService):
         js = bytes(numpy.load(io.BytesIO(oqparam_resp.content))['json'])
         calc = json.loads(js)
 
+        calc_imtls = (calc['risk_imtls'] if 'risk_imtls' in calc
+                      else calc['hazard_imtls'])
+        if (set(imts) - set([x for x in calc_imtls])) != set():
+            gem_log("calc2map: list of imt doesn't match calc imts",
+                    Qgis.Critical)
+            response.setStatusCode(500)
+            response.write("calc2map: list of imt doesn't match calc imts")
+            return
+
         results_req = '%s/v1/calc/%d/results' % (
             engine_url, int(calc_id),)
         gem_log('calc2map: pre results: [%s]' % results_req, Qgis.Info)
@@ -774,9 +784,18 @@ class EWMS(QgsService):
         results_resp = session.get(
             results_req, timeout=100, verify=False, allow_redirects=False)
 
+        results = json.load(io.BytesIO(results_resp.content))
+
         gem_log('calc2map: post oq-param', Qgis.Info)
-        aggrisk_stats_entries = [x for x in json.load(io.BytesIO(results_resp.content)) if
-                              x['type'] == 'aggrisk-stats']
+        avg_gmf_entries = [x for x in results if x['type'] == 'avg_gmf']
+        if len(avg_gmf_entries) != 1:
+            with_gmf_layers = False
+            resp_notes = 'Average GMF not found, no Ground Motion Fields layers will be created.'
+        else:
+            resp_notes = 'tutto occhei'
+            with_gmf_layers = True
+
+        aggrisk_stats_entries = [x for x in results if x['type'] == 'aggrisk-stats']
         if len(aggrisk_stats_entries) != 1:
             response.setStatusCode(500)
             response.write("calc2map: 'aggrisk-stats' output not found")
@@ -922,7 +941,7 @@ class EWMS(QgsService):
                 print('LISTDIR: %s' % os.listdir(tempdir))
                 print('calc_id: %d' % int(calc_id))
                 fp_out = tempfile.NamedTemporaryFile(mode="w", delete=False)
-                print('CSVOUT avg_damages: %s' % fp_out.name)
+                print('CSVOUT aggrisk-stats: %s' % fp_out.name)
 
                 for aggr_key in aggrs_by:
                     aggr_by = aggrs_by[aggr_key]
@@ -1029,6 +1048,106 @@ class EWMS(QgsService):
             layer_folder = '%s/layers' % project_folder
             os.makedirs(project_folder)
             os.makedirs(layer_folder)
+
+            root = project.layerTreeRoot()
+            met_group = root.addGroup("Risk Metrics")
+            # --- begin imts ---
+            if with_gmf_layers:
+                gmf_group = root.addGroup("Ground Motion Fields")
+
+                for imt in imts[::-1]:
+                    resp = session.get(
+                        '%s/v1/calc/%d/extract/avg_gmf?imt=%s' % (
+                            engine_url, int(calc_id), imt),
+                        timeout=100, verify=False, allow_redirects=False)
+
+                    try:
+                        if numpy.__version__ >= '1.24.0':
+                            extracted_npz = numpy.load(
+                                io.BytesIO(resp.content), allow_pickle=False,
+                                max_header_size=100000)
+                        else:
+                            extracted_npz = numpy.load(
+                                io.BytesIO(resp.content), allow_pickle=False)
+                    except Exception as exc:
+                        print('FIXME: failure here %s' % exc)
+
+                    # New vector layer initialization
+                    layer = QgsVectorLayer("Point", imt, "memory")
+
+                    # Add fields to the layer
+                    layer.dataProvider().addAttributes([
+                        QgsField(imt, QVariant.Double)
+                    ])
+                    layer.updateFields()
+
+                    extracted_tuples = numpy.column_stack((
+                        extracted_npz['lons'], extracted_npz['lats'],
+                        extracted_npz[imt]))
+
+                    #  import pdb ; _mute() ; pdb.set_trace()
+
+                    all_features = []
+                    with edit(layer):
+                        # for idx in range(0, len(extracted_npz['lons'])):
+                        # for idx in range(0, 100):
+                        for idx, (lon, lat, imt_val) in enumerate(
+                                extracted_tuples):
+                            # if (idx % 1000) == 0:
+                            #     print("Idx: %d, lon %f lat %f val %f" % (
+                            #           idx, lon, lat, imt_val))
+
+                            # if idx == 1000:
+                            #     break
+
+                            # Create some sample features
+                            feature = QgsFeature()
+                            feature.setGeometry(QgsGeometry.fromPointXY(
+                                QgsPointXY(float(lon), float(lat))))
+                            feature.setAttributes([float(imt_val)])
+                            all_features.append(feature)
+
+                        layer.dataProvider().addFeatures(all_features)
+
+                        # Update the layer extension
+                        layer.updateExtents()
+
+                # Save layer as GeoPackage
+                save_options = QgsVectorFileWriter.SaveVectorOptions()
+                save_options.driverName = "GPKG"
+                layer_name = imt
+                save_options.layerName = layer_name
+
+                gpkg_filepath = '%s/%s_%s_%s.gpkg' % (
+                    layer_folder, description, imt, rnd_sfx)
+                gem_log('calc2map: pre layer save [%s]' % gpkg_filepath,
+                        Qgis.Critical)
+                error = QgsVectorFileWriter.writeAsVectorFormat(
+                    layer, gpkg_filepath,
+                    "UTF-8", layer.crs(), "GPKG",
+                    layerOptions=['OVERWRITE=YES'])
+
+                gem_log('calc2map: post layer save', Qgis.Critical)
+
+                if error[0] == QgsVectorFileWriter.NoError:
+                    print("Layer save: success")
+                else:
+                    print("Layer save: error:", error)
+
+                imt_layer = QgsVectorLayer(gpkg_filepath, layer_name, 'ogr')
+
+                gem_log('IMT: %s' % imt, Qgis.Critical)
+
+                _style_curves(imt_layer, imt)
+
+                # add gpkg layer to current QGIS project
+                gmf_group.addLayer(project.addMapLayer(imt_layer, False))
+
+                extent = layer.extent()
+                ref_rect = QgsReferencedRectangle(extent, layer.crs())
+                vs_project = project.viewSettings()
+                vs_project.setDefaultViewExtent(ref_rect)
+            # --- end imts ---
 
             processing.Processing.initialize()
 
@@ -1335,7 +1454,7 @@ class EWMS(QgsService):
 
                 out_real_layer.setRenderer(renderer)
                 out_real_layer.setId(qta_key + '_qgis_id')
-                project.addMapLayer(out_real_layer)
+                met_group.addLayer(project.addMapLayer(out_real_layer, False))
 
                 extent = out_real_layer.extent()
                 gem_log('calc2map: extent of %s: %s' % (qta['descr'], extent), Qgis.Critical)
@@ -1402,11 +1521,14 @@ class EWMS(QgsService):
             gem_log('calc2map: post project zip', Qgis.Critical)
 
             response.setStatusCode(200)
+            resp_dict = {'uploaded_file': os.path.basename(
+                             archive_pathname)
+                         }
+            if resp_notes:
+                resp_dict['notes'] = resp_notes
+
             response.write(
-                json.dumps({'owner': 'mop',
-                            'uploaded_file': os.path.basename(
-                                archive_pathname)},
-                           indent=4, sort_keys=True))
+                json.dumps(resp_dict, indent=4, sort_keys=True))
 
         except Exception as e:
             gem_log('calc2map: general exception occurred: %s' % e,
