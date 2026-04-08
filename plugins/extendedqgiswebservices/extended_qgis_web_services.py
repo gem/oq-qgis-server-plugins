@@ -683,11 +683,11 @@ class EWMS(QgsService):
 
         quantities = {}
 
-        quantities['fatalities'] = qta_init.copy()
-        quantities['fatalities']['descr'] = 'Fatalities'
-        quantities['fatalities']['ramp_col'] = '#E94E4E'
-        quantities['fatalities']['field'] = 'structural-fatalities'
-        quantities['fatalities']['rel_fields'] = ['value-residents']
+        quantities['complete_damage'] = qta_init.copy()
+        quantities['complete_damage']['descr'] = 'Buildings Beyond Repair'
+        quantities['complete_damage']['ramp_col'] = '#7057A3'
+        quantities['complete_damage']['field'] = 'structural-complete'
+        quantities['complete_damage']['rel_fields'] = ['value-number']
 
         quantities['economic_losses'] = qta_init.copy()
         quantities['economic_losses']['descr'] = 'Economic Losses'
@@ -695,11 +695,11 @@ class EWMS(QgsService):
         quantities['economic_losses']['field'] = 'structural-losses'
         quantities['economic_losses']['rel_fields'] = ['value-structural','value-nonstructural','value-contents']
 
-        quantities['complete_damage'] = qta_init.copy()
-        quantities['complete_damage']['descr'] = 'Buildings Beyond Repair'
-        quantities['complete_damage']['ramp_col'] = '#7057A3'
-        quantities['complete_damage']['field'] = 'structural-complete'
-        quantities['complete_damage']['rel_fields'] = ['value-number']
+        quantities['fatalities'] = qta_init.copy()
+        quantities['fatalities']['descr'] = 'Fatalities'
+        quantities['fatalities']['ramp_col'] = '#E94E4E'
+        quantities['fatalities']['field'] = 'structural-fatalities'
+        quantities['fatalities']['rel_fields'] = ['value-residents']
 
         # to speedup devel set it to a small value (100 is a good value)
         MAX_FEATURES =  os.getenv('GEM_GV_MAX_FEATURES', -1)
@@ -792,7 +792,7 @@ class EWMS(QgsService):
             with_gmf_layers = False
             resp_notes = 'Average GMF not found, no Ground Motion Fields layers will be created.'
         else:
-            resp_notes = 'tutto occhei'
+            resp_notes = ''
             with_gmf_layers = True
 
         aggrisk_stats_entries = [x for x in results if x['type'] == 'aggrisk-stats']
@@ -1055,7 +1055,9 @@ class EWMS(QgsService):
             if with_gmf_layers:
                 gmf_group = root.addGroup("Ground Motion Fields")
 
-                for imt in imts[::-1]:
+                for imt in imts:
+                    gem_log('calc2map: imts loop [%s]' % imt, Qgis.Critical)
+
                     resp = session.get(
                         '%s/v1/calc/%d/extract/avg_gmf?imt=%s' % (
                             engine_url, int(calc_id), imt),
@@ -1112,41 +1114,41 @@ class EWMS(QgsService):
                         # Update the layer extension
                         layer.updateExtents()
 
-                # Save layer as GeoPackage
-                save_options = QgsVectorFileWriter.SaveVectorOptions()
-                save_options.driverName = "GPKG"
-                layer_name = imt
-                save_options.layerName = layer_name
+                    # Save layer as GeoPackage
+                    save_options = QgsVectorFileWriter.SaveVectorOptions()
+                    save_options.driverName = "GPKG"
+                    layer_name = imt
+                    save_options.layerName = layer_name
 
-                gpkg_filepath = '%s/%s_%s_%s.gpkg' % (
-                    layer_folder, description, imt, rnd_sfx)
-                gem_log('calc2map: pre layer save [%s]' % gpkg_filepath,
-                        Qgis.Critical)
-                error = QgsVectorFileWriter.writeAsVectorFormat(
-                    layer, gpkg_filepath,
-                    "UTF-8", layer.crs(), "GPKG",
-                    layerOptions=['OVERWRITE=YES'])
+                    gpkg_filepath = '%s/%s_%s_%s.gpkg' % (
+                        layer_folder, description, imt, rnd_sfx)
+                    gem_log('calc2map: pre layer save [%s]' % gpkg_filepath,
+                            Qgis.Critical)
+                    error = QgsVectorFileWriter.writeAsVectorFormat(
+                        layer, gpkg_filepath,
+                        "UTF-8", layer.crs(), "GPKG",
+                        layerOptions=['OVERWRITE=YES'])
 
-                gem_log('calc2map: post layer save', Qgis.Critical)
+                    gem_log('calc2map: post layer save', Qgis.Critical)
 
-                if error[0] == QgsVectorFileWriter.NoError:
-                    print("Layer save: success")
-                else:
-                    print("Layer save: error:", error)
+                    if error[0] == QgsVectorFileWriter.NoError:
+                        print("Layer save: success")
+                    else:
+                        print("Layer save: error:", error)
 
-                imt_layer = QgsVectorLayer(gpkg_filepath, layer_name, 'ogr')
+                    imt_layer = QgsVectorLayer(gpkg_filepath, layer_name, 'ogr')
 
-                gem_log('IMT: %s' % imt, Qgis.Critical)
+                    gem_log('IMT: %s' % imt, Qgis.Critical)
 
-                _style_curves(imt_layer, imt)
+                    _style_curves(imt_layer, imt)
 
-                # add gpkg layer to current QGIS project
-                gmf_group.addLayer(project.addMapLayer(imt_layer, False))
+                    # add gpkg layer to current QGIS project
+                    gmf_group.addLayer(project.addMapLayer(imt_layer, False))
 
-                extent = layer.extent()
-                ref_rect = QgsReferencedRectangle(extent, layer.crs())
-                vs_project = project.viewSettings()
-                vs_project.setDefaultViewExtent(ref_rect)
+                    extent = layer.extent()
+                    ref_rect = QgsReferencedRectangle(extent, layer.crs())
+                    vs_project = project.viewSettings()
+                    vs_project.setDefaultViewExtent(ref_rect)
             # --- end imts ---
 
             processing.Processing.initialize()
